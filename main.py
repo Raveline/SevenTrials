@@ -1,6 +1,7 @@
 # * Should store a reference to the root Object on components so sub components dont need to use things like self.owner.owner
-# * Seperate code into separate files
+# * Seperate code into files
 # * Move data into data files
+# * Tiles should be able to set their own background_color
 
 import libtcodpy as libtcod
 import math
@@ -451,12 +452,15 @@ def random_choice(chances_dict):
 
 
 class Tile:
-	def __init__(self, blocked, block_sight = None):
+	def __init__(self, blocked, block_sight=None, background_color=None, bgColorMap=None):
 		self.blocked = blocked
 		if block_sight is None: block_sight = blocked
 		self.block_sight = block_sight
 		self.explored = False
-
+		self.background_color = background_color
+		if bgColorMap is not None:
+			random_index = libtcod.random_get_int(0, 0, 8)
+			self.background_color = bgColorMap[random_index]
 
 class Rect:
 	def __init__(self, x, y, w, h):
@@ -491,9 +495,17 @@ def next_level():
 def make_map():
 	global map, objects, stairs
 
+	floorBGColorMapIndexes = [0, 8]
+	floorBGColorMapColors = [libtcod.Color(180, 134, 30), libtcod.Color(200, 180, 50)]
+	tileBGColorMap = libtcod.color_gen_map(floorBGColorMapColors, floorBGColorMapIndexes)
+
+	wallBGColorMapIndexes = [0, 8]
+	wallBGColorMapColors = [libtcod.Color(83, 60, 25), libtcod.Color(112, 81, 34)]
+	wallBGColorMap = libtcod.color_gen_map(wallBGColorMapColors, wallBGColorMapIndexes)
+
 	objects = [player]
 
-	map = [[ Tile(True)
+	map = [[ Tile(True, bgColorMap=wallBGColorMap)
 		for y in range(MAP_HEIGHT) ]
 			for x in range(MAP_WIDTH) ]
 
@@ -511,7 +523,7 @@ def make_map():
 				failed = True
 				break
 		if not failed:
-			create_room(new_room)
+			create_room(new_room, tileBGColorMap)
 			place_objects(new_room)
 			(new_x, new_y) = new_room.center()
 
@@ -521,36 +533,41 @@ def make_map():
 			else:
 				(prev_x, prev_y) = rooms[num_rooms-1].center()
 				if libtcod.random_get_int(0, 0, 1) == 1:
-					create_h_tunnel(prev_x, new_x, prev_y)
-					create_v_tunnel(prev_y, new_y, new_x)
+					create_h_tunnel(prev_x, new_x, prev_y, tileBGColorMap)
+					create_v_tunnel(prev_y, new_y, new_x, tileBGColorMap)
 				else:
-					create_v_tunnel(prev_y, new_y, prev_x)
-					create_h_tunnel(prev_x, new_x, new_y)
+					create_v_tunnel(prev_y, new_y, prev_x, tileBGColorMap)
+					create_h_tunnel(prev_x, new_x, new_y, tileBGColorMap)
 			rooms.append(new_room)
 			num_rooms += 1
 
 	stairs = Object(new_x, new_y, '>', 'stairs', libtcod.white, always_visible=True)
 	objects.append(stairs)
 
-def create_room(room):
+def create_room(room, bgColorMap):
 	global map
-
 	for x in range(room.x1 + 1, room.x2):
 		for y in range(room.y1 + 1, room.y2):
 			map[x][y].blocked = False
 			map[x][y].block_sight = False
+			random_index = libtcod.random_get_int(0, 0, 8)
+			map[x][y].background_color = bgColorMap[random_index]
 
-def create_h_tunnel(x1, x2, y):
+def create_h_tunnel(x1, x2, y, bgColorMap):
 	global map;
 	for x in range(min(x1,x2), max(x1, x2) + 1):
 		map[x][y].blocked = False
 		map[x][y].block_sight = False
+		random_index = libtcod.random_get_int(0, 0, 8)
+		map[x][y].background_color = bgColorMap[random_index]
 
-def create_v_tunnel(y1, y2, x):
+def create_v_tunnel(y1, y2, x, bgColorMap):
 	global map
 	for y in range(min(y1,y2), max (y1,y2) + 1):
 		map[x][y].blocked = False
 		map[x][y].block_sight = False
+		random_index = libtcod.random_get_int(0, 0, 8)
+		map[x][y].background_color = bgColorMap[random_index]
 
 def place_objects(room):
 	max_monsters = from_dungeon_level([[2, 1], [3, 4], [5, 6]])
@@ -653,9 +670,15 @@ def render_all():
 						libtcod.console_set_char_background(con, x, y, color_dark_ground, libtcod.BKGND_SET)
 			else:
 				if wall:
-					libtcod.console_set_char_background(con, x, y, color_light_wall, libtcod.BKGND_SET)
+					if map[x][y].background_color:
+						libtcod.console_set_char_background(con, x, y, map[x][y].background_color, libtcod.BKGND_SET)
+					else:
+						libtcod.console_set_char_background(con, x, y, color_light_wall, libtcod.BKGND_SET)
 				else:
-					libtcod.console_set_char_background(con, x, y, color_light_ground, libtcod.BKGND_SET)
+					if map[x][y].background_color:
+						libtcod.console_set_char_background(con, x, y, map[x][y].background_color, libtcod.BKGND_SET)
+					else:
+						libtcod.console_set_char_background(con, x, y, color_light_ground, libtcod.BKGND_SET)
 				map[x][y].explored = True
 
 	libtcod.console_blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 0)
@@ -811,7 +834,6 @@ def equipment_menu(header):
 			options.append("("+slot_name+") "+equippable.owner.owner.name)
 			keys.append(slot_name)
 
-	print options
 	index = menu(header, options, EQUIPMENT_WIDTH)
 
 	if index is None or len(player.fighter.equipment.slots) == 0: return None
@@ -915,7 +937,6 @@ def save_game():
 	file['game_msgs'] = game_msgs
 	file['game_state'] = game_state
 	file.close()
-
 
 def load_game():
 	global map, objects, player, inventory, game_msgs, game_state, stairs, dungeon_level
