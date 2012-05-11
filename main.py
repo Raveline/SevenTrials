@@ -1,4 +1,6 @@
 # * Should store a reference to the root Object on components so sub components dont need to use things like self.owner.owner
+# * Seperate code into separate files
+# * Move data into data files
 
 import libtcodpy as libtcod
 import math
@@ -107,8 +109,8 @@ def handle_keys():
 					'\nExperience: ' + str(player.fighter.xp) +
 					'\nExperience to level up: ' + str(level_up_xp) +
 					'\n\nMaximum HP: ' + str(player.fighter.max_hp) + 
-					'\nAttack: ' + str(player.fighter.power) + 
-					'\nDefense: ' + str(player.fighter.defense), CHARACTER_SCREEN_WIDTH)
+					'\nAttack: ' + str(player.fighter.get_score('power')) + 
+					'\nDefense: ' + str(player.fighter.get_score('defense')), CHARACTER_SCREEN_WIDTH)
 
 			return 'didnt-take-turn'
 
@@ -222,6 +224,23 @@ class Fighter:
 		if self.equipment:
 			self.equipment.owner = self;
 
+	def get_score(self, value_name):
+		score = 0
+		if hasattr(self, value_name):
+			score = getattr(self, value_name)
+
+		# TODO: this is also where you would want to factor in bonuses from equipment and effects and such
+		# Factor in bonuses from equipment
+		if self.equipment:
+			print self.equipment.slots
+			for slot_name in self.equipment.slots:
+				equippable = self.equipment.slots[slot_name]
+				eq_bonus = equippable.score_bonuses.get(value_name)
+				if eq_bonus is not None:
+					score += eq_bonus
+
+		return score
+
 	def take_damage(self, damage):
 		if damage > 0:
 			self.hp -= damage
@@ -235,7 +254,7 @@ class Fighter:
 			player.fighter.xp != self.xp
 
 	def attack(self, target):
-		damage = self.power - target.fighter.defense
+		damage = self.get_score('power') - target.fighter.get_score('defense')
 
 		if damage > 0:
 			message(self.owner.name.capitalize() + ' attacks ' + target.name + ' for ' + str(damage) + ' hit points.')
@@ -338,8 +357,9 @@ class Item:
 				inventory.remove(self.owner)
 
 class Equippable:
-	def __init__(self, equip_slot=None):
+	def __init__(self, equip_slot=None, score_bonuses=None):
 		self.equip_slot = equip_slot
+		self.score_bonuses = score_bonuses
 
 def player_death(player):
 	global game_state
@@ -585,7 +605,8 @@ def place_objects(room):
 				item_component = Item(use_function=cast_confuse)
 				item = Object(x, y, '#', 'scroll of confusion', libtcod.light_yellow, item=item_component)
 			elif choice == 'helmet':
-				equippable_component = Equippable(equip_slot="head")
+				score_bonuses = {'defense': 5}
+				equippable_component = Equippable(equip_slot="head", score_bonuses=score_bonuses)
 				item_component = Item(equippable=equippable_component)
 				item = Object(x, y, '[', 'helmet', libtcod.dark_sepia, item=item_component)
 			item.always_visible = True
