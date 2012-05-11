@@ -1,11 +1,5 @@
-# ****** TODO:
-# *** Need:
-# * Equipment
-#     * Remove items already equipped when equipping to an occupied equip slot
-# -------
-# *** Want:
-#
-# -------
+# * Should store a reference to the root Object on components so sub components dont need to use things like self.owner.owner
+
 import libtcodpy as libtcod
 import math
 import shelve
@@ -26,6 +20,7 @@ MSG_HEIGHT = PANEL_HEIGHT - 1
 CHARACTER_SCREEN_WIDTH = 30
 INVENTORY_WIDTH = 50
 LEVEL_SCREEN_WIDTH = 40
+EQUIPMENT_WIDTH = 50
 
 MAP_WIDTH = 80
 MAP_HEIGHT = 43
@@ -81,11 +76,19 @@ def handle_keys():
 					if object.x == player.x and object.y == player.y and object.item:
 						object.item.pick_up()
 						break;
+
 			if key_char == 'i':
 				libtcod.console_flush()
 				chosen_item = inventory_menu('Press the key next to an item to use it, or an other to cancel.\n')
 				if chosen_item is not None:
 					chosen_item.use()
+
+			if key_char == 'e':
+				print "e!"
+				libtcod.console_flush()
+				chosen_equippable = equipment_menu('Press the key next to an equipped item to remove it.\n')
+				if chosen_equippable is not None:
+					player.fighter.equipment.unequip(chosen_equippable)
 
 			if key_char == 'd':
 				chosen_item = inventory_menu('Press the key next to an item to drop it, or an other to cancel.\n')
@@ -248,9 +251,8 @@ class Fighter:
 # A component of Fighter
 class Equipment:
 	def __init__(self, equip_slots=None):
-		self.equip_slots = {}
-		for slot_name in equip_slots:
-			self.equip_slots[slot_name] = {}
+		self.equip_slots = equip_slots
+		self.slots = {}
 
 	def equip(self, equippable):
 		global inventory
@@ -266,7 +268,14 @@ class Equipment:
 			message('You equip the '+equippable.owner.owner.name+' to your '+equippable.equip_slot)
 			inventory.remove(equippable.owner.owner)
 
-		self.equip_slots[equippable.equip_slot]	= equippable
+		self.slots[equippable.equip_slot] = equippable
+
+	def unequip(self, equippable):
+		global inventory
+		message('You remove the '+equippable.owner.owner.name+' from your '+equippable.equip_slot)
+		del self.slots[equippable.equip_slot]
+		if not equippable.owner.pick_up():
+			equippable.owner.drop()
 
 class BasicMonster:
 	def take_turn(self):
@@ -301,10 +310,13 @@ class Item:
 	def pick_up(self):
 		if len(inventory) >= 26:
 			message('Your inventory is full, cannot pick up ' + self.owner.name + '.', libtcod.red)
+			return False
 		else:
 			inventory.append(self.owner)
-			objects.remove(self.owner)
+			if self.owner in objects:
+				objects.remove(self.owner)
 			message('You picked up a ' + self.owner.name + '!', libtcod.green)
+			return True
 
 	def drop(self):
 		objects.append(self.owner)
@@ -765,6 +777,28 @@ def inventory_menu(header):
 	if index is None or len(inventory) == 0: return None
 	return inventory[index].item
 
+def equipment_menu(header):
+	keys = None
+	if len(player.fighter.equipment.slots) == 0:
+		print "Nothing equipped!"
+		options =['You have nothing equipped']
+	else:
+		options = []
+		keys = []
+		for slot_name in player.fighter.equipment.slots:
+			equippable = player.fighter.equipment.slots[slot_name]
+			options.append("("+slot_name+") "+equippable.owner.owner.name)
+			keys.append(slot_name)
+
+	print options
+	index = menu(header, options, EQUIPMENT_WIDTH)
+
+	if index is None or len(player.fighter.equipment.slots) == 0: return None
+	if keys is None:
+		return player.fighter.equipment.slots[index]
+	else:
+		return player.fighter.equipment.slots[keys[index]]
+
 def msgbox(text, width=50):
 	menu(text, [], width)
 
@@ -777,7 +811,7 @@ def main_menu():
 		libtcod.console_set_default_foreground(0, libtcod.light_yellow)
 		libtcod.console_set_background_flag(0, libtcod.BKGND_NONE)
 		libtcod.console_set_alignment(0, libtcod.CENTER)
-		libtcod.console_print(0, SCREEN_WIDTH/2, SCREEN_HEIGHT/2-4, 'TOMBS OF THE ANCIENT KINGS')
+		libtcod.console_print(0, SCREEN_WIDTH/2, SCREEN_HEIGHT/2-4, 'SEVEN TRIALS')
 		libtcod.console_print(0, SCREEN_WIDTH/2, SCREEN_HEIGHT-2, 'By nefD')
 
 		choice = menu('', ['Play a new game', 'Continue last game', 'Quit'], 24)
