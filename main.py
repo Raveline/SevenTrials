@@ -4,6 +4,7 @@
 # * Character creation screen (name for now)
 # * Should store a reference to the root Object on components so sub components dont need to use things like self.owner.owner
 # * Item stacking
+# * Mark map cells as not being walkable when inhabited by an actor, and mark the cell back to walkable when the actor moves
 
 import libtcodpy as libtcod
 import math
@@ -90,7 +91,6 @@ def handle_keys():
 					chosen_item.use()
 
 			if key_char == 'e':
-				print "e!"
 				libtcod.console_flush()
 				chosen_equippable = equipment_menu('Press the key next to an equipped item to remove it.\n')
 				if chosen_equippable is not None:
@@ -186,11 +186,17 @@ class Object:
 			self.y += dy 
 
 	def move_towards(self, target_x, target_y):
-		dx = target_x - self.x
-		dy = target_y - self.y
-		distance = math.sqrt(dx ** 2 + dy ** 2)
-		dx = int(round(dx / distance))
-		dy = int(round(dy / distance))
+		libtcod.path_compute(pathfinder, self.x, self.y, target_x, target_y)
+		if not libtcod.path_is_empty(pathfinder):
+			path_x, path_y = libtcod.path_get(pathfinder, 0)
+			dx = path_x - self.x
+			dy = path_y - self.y
+		else:
+			dx = target_x - self.x
+			dy = target_y - self.y
+			distance = math.sqrt(dx ** 2 + dy ** 2)
+			dx = int(round(dx / distance))
+			dy = int(round(dy / distance))
 		self.move(dx, dy)
 
 	def distance(self, x, y):
@@ -284,7 +290,7 @@ class Equipment:
 
 		if equippable.equip_slot not in self.equip_slots:
 			if self.owner.owner == player:
-				print 'You do not have the ' + equippable.equip_slot + ' equip slot.'
+				message('You do not have the ' + equippable.equip_slot + ' equip slot.')
 			return False
 
 		equippable.actor = self.owner
@@ -498,7 +504,7 @@ def next_level():
 
 
 def make_map():
-	global map, objects, stairs
+	global map, objects, stairs, mapWidth, mapHeight
 
 	floorBGColorMapIndexes = [0, 8]
 	floorBGColorMapColors = [libtcod.Color(180, 134, 30), libtcod.Color(200, 180, 50)]
@@ -509,10 +515,12 @@ def make_map():
 	wallBGColorMap = libtcod.color_gen_map(wallBGColorMapColors, wallBGColorMapIndexes)
 
 	objects = [player]
+	mapWidth = MAP_WIDTH
+	mapHeight = MAP_HEIGHT
 
 	map = [[ Tile(True, bgColorMap=wallBGColorMap)
-		for y in range(MAP_HEIGHT) ]
-			for x in range(MAP_WIDTH) ]
+		for y in range(mapHeight) ]
+			for x in range(mapWidth) ]
 
 	rooms = []
 	num_rooms = 0
@@ -733,18 +741,12 @@ def message(new_msg, color=libtcod.white):
 			del game_msgs[0]
 		game_msgs.append( (line, color) )
 
-
 def get_names_under_mouse():
-	#mouse = libtcod.mouse_get_status()
 	(x, y) = (mouse.cx, mouse.cy)
-
-	#print str(x) + ', ' + str(y)
-
 	names = [obj.name for obj in objects
 		if obj.x == x and obj.y == y and libtcod.map_is_in_fov(fov_map, obj.x, obj.y)]
 	names = ', '.join(names)
 	return names.capitalize()
-
 
 def menu(header, options, width):
 	if len(options) > 26: raise ValueError('Cannot have a menu with more than 26 options.')
@@ -825,7 +827,6 @@ def inventory_menu(header):
 def equipment_menu(header):
 	keys = None
 	if len(player.actor.equipment.slots) == 0:
-		print "Nothing equipped!"
 		options =['You have nothing equipped']
 	else:
 		options = []
@@ -875,7 +876,7 @@ def main_menu():
 			break
 
 def new_game():
-	global player, inventory, game_msgs, game_state, dungeon_level
+	global player, inventory, game_msgs, game_state, dungeon_level, pathfinder
 
 	dungeon_level = 1
 	game_msgs = []
@@ -888,6 +889,9 @@ def new_game():
 	game_state = 'playing'
 	make_map()
 	initialize_fov()
+	if pathfinder is not None:
+		libtcod.path_delete(pathfinder)
+	pathfinder = libtcod.path_new_using_map(fov_map)
 
 	message('Welcome stranger! Prepare to perish in the Tombs of the Ancient Kings.', libtcod.red)
 
@@ -1003,6 +1007,7 @@ mouse=libtcod.Mouse()
 con = libtcod.console_new(MAP_WIDTH, MAP_HEIGHT)
 panel = libtcod.console_new(SCREEN_WIDTH, SCREEN_HEIGHT)
 
+pathfinder = None
 monster_data = {}
 load_data()
 main_menu()
