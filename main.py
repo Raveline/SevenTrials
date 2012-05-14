@@ -1,11 +1,9 @@
-# * Should store a reference to the root Object on components so sub components dont need to use things like self.owner.owner
 # * Seperate code into files
 # * Move item data into data files
 # * Starting town
 # * Character creation screen (name for now)
-
-# * Move monster color into data file
-# * Rename Fighter component to Actor
+# * Should store a reference to the root Object on components so sub components dont need to use things like self.owner.owner
+# * Item stacking
 
 import libtcodpy as libtcod
 import math
@@ -96,7 +94,7 @@ def handle_keys():
 				libtcod.console_flush()
 				chosen_equippable = equipment_menu('Press the key next to an equipped item to remove it.\n')
 				if chosen_equippable is not None:
-					player.fighter.equipment.unequip(chosen_equippable)
+					player.actor.equipment.unequip(chosen_equippable)
 
 			if key_char == 'd':
 				chosen_item = inventory_menu('Press the key next to an item to drop it, or an other to cancel.\n')
@@ -112,11 +110,11 @@ def handle_keys():
 				libtcod.console_flush()
 				msgbox('Character Information\n'+
 					'\nLevel: ' + str(player.level) +
-					'\nExperience: ' + str(player.fighter.xp) +
+					'\nExperience: ' + str(player.actor.xp) +
 					'\nExperience to level up: ' + str(level_up_xp) +
-					'\n\nMaximum HP: ' + str(player.fighter.max_hp) + 
-					'\nAttack: ' + str(player.fighter.get_score('power')) + 
-					'\nDefense: ' + str(player.fighter.get_score('defense')), CHARACTER_SCREEN_WIDTH)
+					'\n\nMaximum HP: ' + str(player.actor.max_hp) + 
+					'\nAttack: ' + str(player.actor.get_score('power')) + 
+					'\nDefense: ' + str(player.actor.get_score('defense')), CHARACTER_SCREEN_WIDTH)
 
 			return 'didnt-take-turn'
 
@@ -128,12 +126,12 @@ def player_move_or_attack(dx, dy):
 
 	target = None
 	for object in objects:
-		if object.fighter and object.x == x and object.y == y:
+		if object.actor and object.x == x and object.y == y:
 			target = object
 			break
 
 	if target is not None:
-		player.fighter.attack(target)
+		player.actor.attack(target)
 	else:
 		player.move(dx, dy)
 		fov_recompute = True
@@ -141,30 +139,30 @@ def player_move_or_attack(dx, dy):
 
 def check_level_up():
 	level_up_xp = LEVEL_UP_BASE + player.level * LEVEL_UP_FACTOR
-	if player.fighter.xp >= level_up_xp:
+	if player.actor.xp >= level_up_xp:
 		player.level += 1
-		player.fighter.xp -= level_up_xp
+		player.actor.xp -= level_up_xp
 		message('Your battle skills grow stringer! You reached level ' + str(player.level) + '!', libtcod.yellow)
 
 		choice = None
 		while choice == None:
 			choice = menu('lLevel up! Choose a stat to raise:\n',
-				['Constitution (+20 HP, from ' + str(player.fighter.max_hp) + ')'],
-				['Strength (+1 attack, from ' + str(player.fighter.power) + ')'],
-				['Agility (+1 defense, from ' + str(player.fighter.defense) + ')'], LEVEL_SCREEN_WIDTH)
+				['Constitution (+20 HP, from ' + str(player.actor.max_hp) + ')'],
+				['Strength (+1 attack, from ' + str(player.actor.power) + ')'],
+				['Agility (+1 defense, from ' + str(player.actor.defense) + ')'], LEVEL_SCREEN_WIDTH)
 
 		if choice == 0:
-			player.fighter.max_hp += 20
-			player.fighter.hp += 20
+			player.actor.max_hp += 20
+			player.actor.hp += 20
 		elif choice == 1:
-			player.fighter.power += 1
+			player.actor.power += 1
 		elif choice == 2:
-			player.fighter.defense += 1
+			player.actor.defense += 1
 
 
 
 class Object:
-	def __init__(self, x, y, char, name, color, blocks=False, always_visible=False, fighter=None, ai=None, item=None):
+	def __init__(self, x, y, char, name, color, blocks=False, always_visible=False, actor=None, ai=None, item=None):
 		self.x = x
 		self.y = y
 		self.char = char
@@ -172,9 +170,9 @@ class Object:
 		self.color = color
 		self.blocks = blocks
 		self.always_visible = always_visible
-		self.fighter = fighter
-		if self.fighter:
-			self.fighter.owner = self
+		self.actor = actor
+		if self.actor:
+			self.actor.owner = self
 		self.ai = ai
 		if self.ai:
 			self.ai.owner = self
@@ -218,7 +216,7 @@ class Object:
 		objects.insert(0, self)
 
 
-class Fighter:
+class Actor:
 	def __init__(self, hp, defense, power, xp, death_function=None, equipment=None):
 		self.max_hp = hp
 		self.hp = hp
@@ -259,14 +257,14 @@ class Fighter:
 				function(self.owner)
 
 		if self.owner != player:
-			player.fighter.xp != self.xp
+			player.actor.xp != self.xp
 
 	def attack(self, target):
-		damage = self.get_score('power') - target.fighter.get_score('defense')
+		damage = self.get_score('power') - target.actor.get_score('defense')
 
 		if damage > 0:
 			message(self.owner.name.capitalize() + ' attacks ' + target.name + ' for ' + str(damage) + ' hit points.')
-			target.fighter.take_damage(damage)
+			target.actor.take_damage(damage)
 		else:
 			message(self.owner.name.capitalize() + ' attacks ' + target.name + ' but it has no effect!')
 
@@ -275,7 +273,7 @@ class Fighter:
 		if self.hp > self.max_hp:
 			self.hp = self.max_hp
 
-# A component of Fighter
+# A component of Actor
 class Equipment:
 	def __init__(self, equip_slots=None):
 		self.equip_slots = equip_slots
@@ -289,7 +287,7 @@ class Equipment:
 				print 'You do not have the ' + equippable.equip_slot + ' equip slot.'
 			return False
 
-		equippable.fighter = self.owner
+		equippable.actor = self.owner
 
 		if self.owner.owner == player:
 			message('You equip the '+equippable.owner.owner.name+' to your '+equippable.equip_slot)
@@ -310,8 +308,8 @@ class BasicMonster:
 		if libtcod.map_is_in_fov(fov_map, monster.x, monster.y):
 			if monster.distance_to(player) >= 2:
 				monster.move_towards(player.x, player.y)
-			elif player.fighter.hp > 0:
-				monster.fighter.attack(player)
+			elif player.actor.hp > 0:
+				monster.actor.attack(player)
 
 
 class ConfusedMonster:
@@ -357,7 +355,7 @@ class Item:
 
 		if self.use_function is None:
 			if self.equippable:
-				player.fighter.equipment.equip(self.equippable)
+				player.actor.equipment.equip(self.equippable)
 			else:
 				message('The ' + self.owner.name + ' cannot be used.')
 		else:
@@ -378,22 +376,22 @@ def player_death(player):
 
 
 def monster_death(monster):
-	message(monster.name.capitalize() + ' is dead! You gain ' + str(monster.fighter.xp) + ' experience points.', libtcod.orange)
+	message(monster.name.capitalize() + ' is dead! You gain ' + str(monster.actor.xp) + ' experience points.', libtcod.orange)
 	monster.char = '%'
 	monster.blocks = False
-	monster.fighter = None
+	monster.actor = None
 	monster.ai = None
 	monster.name = 'remains of ' + monster.name
 	monster.send_to_back()
 
 
 def cast_heal():
-	if player.fighter.hp == player.fighter.max_hp:
+	if player.actor.hp == player.actor.max_hp:
 		message('You are already at full health', libtcod.red)
 		return 'cancelled'
 
 	message('Your wounds start to feel better!', libtcod.light_violet)
-	player.fighter.heal(HEAL_AMOUNT)
+	player.actor.heal(HEAL_AMOUNT)
 
 
 def cast_lightning():
@@ -402,7 +400,7 @@ def cast_lightning():
 		message('No enemy is close enough to strike.', libtcod.red)
 		return 'cancelled'
 	message('A lightning bolt strikes the ' + monster.name + ' with a loud thunder! the damage is ' + str(LIGHTNING_DAMAGE) + ' hit points.', libtcod.light_blue)
-	monster.fighter.take_damage(LIGHTNING_DAMAGE)	
+	monster.actor.take_damage(LIGHTNING_DAMAGE)	
 
 
 def cast_confuse():
@@ -423,16 +421,16 @@ def cast_fireball():
 	message('The fireball explodes, burning everything within ' + str(FIREBALL_RADIUS) + ' tiles!', libtcod.orange)
 
 	for obj in objects:
-		if obj.distance(x, y) <= FIREBALL_RADIUS and obj.fighter:
+		if obj.distance(x, y) <= FIREBALL_RADIUS and obj.actor:
 			message('The ' + obj.name + ' gets burned for ' + str(FIREBALL_DAMAGE) + ' hit points.', libtcod.orange)
-			obj.fighter.take_damage(FIREBALL_DAMAGE)
+			obj.actor.take_damage(FIREBALL_DAMAGE)
 
 def closest_monster(max_range):
 	closest_enemy = None
 	closest_dist = max_range + 1
 
 	for object in objects:
-		if object.fighter and not object == player and libtcod.map_is_in_fov(fov_map, object.x, object.y):
+		if object.actor and not object == player and libtcod.map_is_in_fov(fov_map, object.x, object.y):
 			dist = player.distance_to(object)
 			if dist < closest_dist:
 				closest_enemy = object
@@ -491,7 +489,7 @@ class Rect:
 def next_level():
 	global dungeon_level
 	message('You take a moment to rest, and record your strength.', libtcod.light_violet)
-	player.fighter.heal(player.fighter.max_hp / 2)
+	player.actor.heal(player.actor.max_hp / 2)
 
 	message('After a rare moment of peace, you descend deeper into the heart of the dungeon...', libtcod.red)
 	dungeon_level += 1
@@ -599,9 +597,9 @@ def place_objects(room):
 		if not is_blocked(x, y):
 			choice = random_choice(monster_chances)
 			tmpData = monster_data[choice]
-			fighter_component = Fighter(xp=tmpData['xp'], hp=tmpData['hp'], defense=tmpData['defense'], power=tmpData['power'], death_function=tmpData['death_function'])
+			actor_component = Actor(xp=tmpData['xp'], hp=tmpData['hp'], defense=tmpData['defense'], power=tmpData['power'], death_function=tmpData['death_function'])
 			ai_component = BasicMonster()
-			monster = Object(x, y, tmpData['character'], tmpData['name'], tmpData['character_color'], blocks=True, fighter=fighter_component, ai=ai_component)
+			monster = Object(x, y, tmpData['character'], tmpData['name'], tmpData['character_color'], blocks=True, actor=actor_component, ai=ai_component)
 			objects.append(monster)
 
 	num_items = libtcod.random_get_int(0, 0, max_items)
@@ -697,7 +695,7 @@ def render_all():
 		libtcod.console_print(panel, MSG_X, y, line)
 		y += 1
 
-	render_bar(1, 1, BAR_WIDTH, 'HP', player.fighter.hp, player.fighter.max_hp,
+	render_bar(1, 1, BAR_WIDTH, 'HP', player.actor.hp, player.actor.max_hp,
 		libtcod.light_red, libtcod.darker_red)
 
 	libtcod.console_set_alignment(panel, libtcod.LEFT)
@@ -810,7 +808,7 @@ def target_monster(max_range=None):
 			return None
 
 		for obj in objects:
-			if obj.x == x and obj.y == y and obj.fighter and obj != player:
+			if obj.x == x and obj.y == y and obj.actor and obj != player:
 				return obj
 
 def inventory_menu(header):
@@ -826,24 +824,24 @@ def inventory_menu(header):
 
 def equipment_menu(header):
 	keys = None
-	if len(player.fighter.equipment.slots) == 0:
+	if len(player.actor.equipment.slots) == 0:
 		print "Nothing equipped!"
 		options =['You have nothing equipped']
 	else:
 		options = []
 		keys = []
-		for slot_name in player.fighter.equipment.slots:
-			equippable = player.fighter.equipment.slots[slot_name]
+		for slot_name in player.actor.equipment.slots:
+			equippable = player.actor.equipment.slots[slot_name]
 			options.append("("+slot_name+") "+equippable.owner.owner.name)
 			keys.append(slot_name)
 
 	index = menu(header, options, EQUIPMENT_WIDTH)
 
-	if index is None or len(player.fighter.equipment.slots) == 0: return None
+	if index is None or len(player.actor.equipment.slots) == 0: return None
 	if keys is None:
-		return player.fighter.equipment.slots[index]
+		return player.actor.equipment.slots[index]
 	else:
-		return player.fighter.equipment.slots[keys[index]]
+		return player.actor.equipment.slots[keys[index]]
 
 def msgbox(text, width=50):
 	menu(text, [], width)
@@ -884,8 +882,8 @@ def new_game():
 	inventory = []
 	player_equip_slots = ["head", "torso"]
 	player_equipment_component = Equipment(equip_slots=player_equip_slots)
-	player_fighter_component = Fighter(xp=0, hp=100, defense=1, power=4, death_function=player_death, equipment=player_equipment_component)
-	player = Object(0, 0, '@', 'player', libtcod.white, blocks=True, fighter=player_fighter_component)
+	player_actor_component = Actor(xp=0, hp=100, defense=1, power=4, death_function=player_death, equipment=player_equipment_component)
+	player = Object(0, 0, '@', 'player', libtcod.white, blocks=True, actor=player_actor_component)
 	player.level = 1
 	game_state = 'playing'
 	make_map()
