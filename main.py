@@ -1,10 +1,12 @@
 # * Should store a reference to the root Object on components so sub components dont need to use things like self.owner.owner
 # * Seperate code into files
 # * Move data into data files
-# * Tiles should be able to set their own background_color
+# * Starting town
+# * Character creation screen (name for now)
 
 import libtcodpy as libtcod
 import math
+import os
 import shelve
 import textwrap
 
@@ -220,7 +222,10 @@ class Fighter:
 		self.defense = defense
 		self.power = power
 		self.xp = xp
-		self.death_function = death_function
+		if isinstance(death_function, str):
+			self.death_function = globals()[death_function]
+		else:
+			self.death_function = death_function
 		self.equipment = equipment;
 		if self.equipment:
 			self.equipment.owner = self;
@@ -233,7 +238,6 @@ class Fighter:
 		# TODO: this is also where you would want to factor in bonuses from equipment and effects and such
 		# Factor in bonuses from equipment
 		if self.equipment:
-			print self.equipment.slots
 			for slot_name in self.equipment.slots:
 				equippable = self.equipment.slots[slot_name]
 				eq_bonus = equippable.score_bonuses.get(value_name)
@@ -592,13 +596,15 @@ def place_objects(room):
 		if not is_blocked(x, y):
 			choice = random_choice(monster_chances)
 			if choice == 'orc':
-				fighter_component = Fighter(xp=35, hp=20, defense=0, power=4, death_function=monster_death)
+				tmpData = monster_data[choice]
+				fighter_component = Fighter(xp=tmpData['xp'], hp=tmpData['hp'], defense=tmpData['defense'], power=tmpData['power'], death_function=tmpData['death_function'])
 				ai_component = BasicMonster()
-				monster = Object(x, y, 'o', 'orc', libtcod.desaturated_green, blocks=True, fighter=fighter_component, ai=ai_component)
+				monster = Object(x, y, tmpData['character'], tmpData['name'], libtcod.desaturated_green, blocks=True, fighter=fighter_component, ai=ai_component)
 			elif choice == 'troll':
-				fighter_component = Fighter(xp=100, hp=30, defense=2, power=8, death_function=monster_death)
+				tmpData = monster_data[choice]
+				fighter_component = Fighter(xp=tmpData['xp'], hp=tmpData['hp'], defense=tmpData['defense'], power=tmpData['power'], death_function=tmpData['death_function'])
 				ai_component = BasicMonster()
-				monster = Object(x, y, 'T', 'troll', libtcod.darker_green, blocks=True, fighter=fighter_component, ai=ai_component)
+				monster = Object(x, y, tmpData['character'], tmpData['name'], libtcod.darker_green, blocks=True, fighter=fighter_component, ai=ai_component)
 			objects.append(monster)
 
 	num_items = libtcod.random_get_int(0, 0, max_items)
@@ -954,6 +960,45 @@ def load_game():
 
 	initialize_fov()
 
+def load_data():
+	parser = libtcod.parser_new()
+	monsterStruct = libtcod.parser_new_struct(parser, 'monster')
+	libtcod.struct_add_property(monsterStruct, 'name', libtcod.TYPE_STRING, True)
+	libtcod.struct_add_property(monsterStruct, 'character', libtcod.TYPE_STRING, True)
+	libtcod.struct_add_property(monsterStruct, 'xp', libtcod.TYPE_INT, True)
+	libtcod.struct_add_property(monsterStruct, 'hp', libtcod.TYPE_INT, True)
+	libtcod.struct_add_property(monsterStruct, 'defense', libtcod.TYPE_INT, True)
+	libtcod.struct_add_property(monsterStruct, 'power', libtcod.TYPE_INT, True)
+	libtcod.struct_add_property(monsterStruct, 'death_function', libtcod.TYPE_STRING, True)
+	libtcod.parser_run(parser, os.path.join('data', 'monster_data.cfg'), MonsterDataListener())
+
+class MonsterDataListener:
+    def new_struct(self, struct, name):
+    	global monster_data
+        self.current_name = name
+        monster_data[name] = {}
+        return True
+
+    def new_flag(self, name):
+        monster_data[self.current_name][name] = True
+        return True
+
+    def new_property(self,name, typ, value):
+    	global monster_data
+        monster_data[self.current_name][name] = value
+        return True
+
+    def end_struct(self, struct, name):
+    	self.current_name = None
+        return True
+
+    def error(self,msg):
+        print 'Monster data parser error : ', msg
+        if self.current_name is not None:
+        	del monster_data[self.current_name]
+        	self.current_name = None
+        return True
+
 libtcod.console_set_custom_font("arial10x10.png", libtcod.FONT_TYPE_GREYSCALE | libtcod.FONT_LAYOUT_TCOD)
 libtcod.console_init_root(SCREEN_WIDTH, SCREEN_HEIGHT, 'FirstRL', False)
 libtcod.sys_set_fps(LIMIT_FPS)
@@ -962,4 +1007,6 @@ mouse=libtcod.Mouse()
 con = libtcod.console_new(MAP_WIDTH, MAP_HEIGHT)
 panel = libtcod.console_new(SCREEN_WIDTH, SCREEN_HEIGHT)
 
+monster_data = {}
+load_data()
 main_menu()
