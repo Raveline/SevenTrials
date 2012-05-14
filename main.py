@@ -1,8 +1,11 @@
 # * Should store a reference to the root Object on components so sub components dont need to use things like self.owner.owner
 # * Seperate code into files
-# * Move data into data files
+# * Move item data into data files
 # * Starting town
 # * Character creation screen (name for now)
+
+# * Move monster color into data file
+# * Rename Fighter component to Actor
 
 import libtcodpy as libtcod
 import math
@@ -595,16 +598,10 @@ def place_objects(room):
 
 		if not is_blocked(x, y):
 			choice = random_choice(monster_chances)
-			if choice == 'orc':
-				tmpData = monster_data[choice]
-				fighter_component = Fighter(xp=tmpData['xp'], hp=tmpData['hp'], defense=tmpData['defense'], power=tmpData['power'], death_function=tmpData['death_function'])
-				ai_component = BasicMonster()
-				monster = Object(x, y, tmpData['character'], tmpData['name'], libtcod.desaturated_green, blocks=True, fighter=fighter_component, ai=ai_component)
-			elif choice == 'troll':
-				tmpData = monster_data[choice]
-				fighter_component = Fighter(xp=tmpData['xp'], hp=tmpData['hp'], defense=tmpData['defense'], power=tmpData['power'], death_function=tmpData['death_function'])
-				ai_component = BasicMonster()
-				monster = Object(x, y, tmpData['character'], tmpData['name'], libtcod.darker_green, blocks=True, fighter=fighter_component, ai=ai_component)
+			tmpData = monster_data[choice]
+			fighter_component = Fighter(xp=tmpData['xp'], hp=tmpData['hp'], defense=tmpData['defense'], power=tmpData['power'], death_function=tmpData['death_function'])
+			ai_component = BasicMonster()
+			monster = Object(x, y, tmpData['character'], tmpData['name'], tmpData['character_color'], blocks=True, fighter=fighter_component, ai=ai_component)
 			objects.append(monster)
 
 	num_items = libtcod.random_get_int(0, 0, max_items)
@@ -964,7 +961,8 @@ def load_data():
 	parser = libtcod.parser_new()
 	monsterStruct = libtcod.parser_new_struct(parser, 'monster')
 	libtcod.struct_add_property(monsterStruct, 'name', libtcod.TYPE_STRING, True)
-	libtcod.struct_add_property(monsterStruct, 'character', libtcod.TYPE_STRING, True)
+	libtcod.struct_add_property(monsterStruct, 'character', libtcod.TYPE_CHAR, True)
+	libtcod.struct_add_property(monsterStruct, 'character_color', libtcod.TYPE_COLOR, True)
 	libtcod.struct_add_property(monsterStruct, 'xp', libtcod.TYPE_INT, True)
 	libtcod.struct_add_property(monsterStruct, 'hp', libtcod.TYPE_INT, True)
 	libtcod.struct_add_property(monsterStruct, 'defense', libtcod.TYPE_INT, True)
