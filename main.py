@@ -1,10 +1,10 @@
 # * Seperate code into files
-# * Move item data into data files
 # * Starting town
 # * Character creation screen (name for now)
 # * Should store a reference to the root Object on components so sub components dont need to use things like self.owner.owner
 # * Item stacking
 # * Mark map cells as not being walkable when inhabited by an actor, and mark the cell back to walkable when the actor moves
+# * Move item and monster placement chances into data files
 
 import libtcodpy as libtcod
 import math
@@ -186,6 +186,7 @@ class Object:
 			self.y += dy 
 
 	def move_towards(self, target_x, target_y):
+
 		libtcod.path_compute(pathfinder, self.x, self.y, target_x, target_y)
 		if not libtcod.path_is_empty(pathfinder):
 			path_x, path_y = libtcod.path_get(pathfinder, 0)
@@ -333,7 +334,10 @@ class ConfusedMonster:
 
 class Item:
 	def __init__(self, use_function=None, equippable=None):
-		self.use_function = use_function
+		if isinstance(use_function, str):
+			self.use_function = globals()[use_function]
+		else:
+			self.use_function = use_function
 		self.equippable = equippable
 		if self.equippable:
 			self.equippable.owner = self
@@ -590,10 +594,10 @@ def place_objects(room):
 
 	max_items = from_dungeon_level([[1, 1], [2, 4]])
 	item_chances = {}
-	item_chances['heal'] = 35
-	item_chances['lightning'] = from_dungeon_level([[25, 4]])
-	item_chances['fireball'] = from_dungeon_level([[25, 6]])
-	item_chances['confuse'] = from_dungeon_level([[10, 2]])
+	item_chances['healing potion'] = 35
+	item_chances['lightning scroll'] = from_dungeon_level([[25, 4]])
+	item_chances['fireball scroll'] = from_dungeon_level([[25, 6]])
+	item_chances['confuse scroll'] = from_dungeon_level([[10, 2]])
 	item_chances['helmet'] = 80
 
 	num_monsters = libtcod.random_get_int(0, 0, max_monsters)
@@ -618,23 +622,17 @@ def place_objects(room):
 
 		if not is_blocked(x, y):
 			choice = random_choice(item_chances)
-			if choice == 'heal':
-				item_component = Item(use_function=cast_heal)
-				item = Object(x, y, '!', 'healing potion', libtcod.violet, item=item_component)
-			elif choice == 'lightning':
-				item_component = Item(use_function=cast_lightning)
-				item = Object(x, y, '#', 'scroll of lightning bolt', libtcod.light_yellow, item=item_component)
-			elif choice == 'fireball':
-				item_component = Item(use_function=cast_fireball)
-				item = Object(x, y, '#', 'scroll of fireball', libtcod.light_yellow, item=item_component)
-			elif choice == 'confuse':
-				item_component = Item(use_function=cast_confuse)
-				item = Object(x, y, '#', 'scroll of confusion', libtcod.light_yellow, item=item_component)
-			elif choice == 'helmet':
-				score_bonuses = {'defense': 5}
-				equippable_component = Equippable(equip_slot="head", score_bonuses=score_bonuses)
-				item_component = Item(equippable=equippable_component)
-				item = Object(x, y, '[', 'helmet', libtcod.dark_sepia, item=item_component)
+			tmpData = item_data[choice]
+			if 'equip_slot' in tmpData:
+				equippable_component = Equippable(equip_slot=tmpData['equip_slot'], score_bonuses=tmpData['equip_score_bonuses'])
+			else:
+				equippable_component = None
+			if 'use_function' in tmpData:
+				use_function = tmpData['use_function']
+			else:
+				use_function = None
+			item_component = Item(equippable=equippable_component, use_function=use_function)
+			item = Object(x, y, tmpData['character'], tmpData['name'], tmpData['character_color'], item=item_component)
 			item.always_visible = True
 			objects.append(item)
 			item.send_to_back()
@@ -971,6 +969,14 @@ def load_data():
 	libtcod.struct_add_property(monsterStruct, 'power', libtcod.TYPE_INT, True)
 	libtcod.struct_add_property(monsterStruct, 'death_function', libtcod.TYPE_STRING, True)
 	libtcod.parser_run(parser, os.path.join('data', 'monster_data.cfg'), MonsterDataListener())
+	itemStruct = libtcod.parser_new_struct(parser, 'item')
+	libtcod.struct_add_property(itemStruct, 'name', libtcod.TYPE_STRING, True)
+	libtcod.struct_add_property(itemStruct, 'character', libtcod.TYPE_CHAR, True)
+	libtcod.struct_add_property(itemStruct, 'character_color', libtcod.TYPE_COLOR, True)
+	libtcod.struct_add_property(itemStruct, 'use_function', libtcod.TYPE_STRING, False)
+	libtcod.struct_add_property(itemStruct, 'equip_slot', libtcod.TYPE_STRING, False)
+	libtcod.struct_add_list_property(itemStruct, 'equip_score_bonuses', libtcod.TYPE_STRING, False)
+	libtcod.parser_run(parser, os.path.join('data', 'item_data.cfg'), ItemDataListener())
 
 class MonsterDataListener:
     def new_struct(self, struct, name):
@@ -980,6 +986,7 @@ class MonsterDataListener:
         return True
 
     def new_flag(self, name):
+    	global monster_data
         monster_data[self.current_name][name] = True
         return True
 
@@ -993,9 +1000,47 @@ class MonsterDataListener:
         return True
 
     def error(self,msg):
+    	global monster_data
         print 'Monster data parser error : ', msg
         if self.current_name is not None:
         	del monster_data[self.current_name]
+        	self.current_name = None
+        return True
+
+class ItemDataListener:
+    def new_struct(self, struct, name):
+    	global item_data
+        self.current_name = name
+        item_data[name] = {}
+        return True
+
+    def new_flag(self, name):
+    	global item_data
+        item_data[self.current_name][name] = True
+        return True
+
+    def new_property(self,name, typ, value):
+		global item_data
+		#print 'name: '+name+', value: '+str(value)
+		if name == "equip_score_bonuses":
+			print 'hmm'
+			item_data[self.current_name][name] = {}
+			for i in value:
+				parts = i.split(":")
+				item_data[self.current_name][name][parts[0]] = int(parts[1])
+		else:
+			item_data[self.current_name][name] = value
+		return True
+
+    def end_struct(self, struct, name):
+    	self.current_name = None
+        return True
+
+    def error(self,msg):
+    	global item_data
+        print 'Item data parser error : ', msg
+        if self.current_name is not None:
+        	del item_data[self.current_name]
         	self.current_name = None
         return True
 
@@ -1009,5 +1054,7 @@ panel = libtcod.console_new(SCREEN_WIDTH, SCREEN_HEIGHT)
 
 pathfinder = None
 monster_data = {}
+item_data = {}
 load_data()
+print item_data
 main_menu()
