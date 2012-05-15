@@ -3,7 +3,7 @@
 # * Character creation screen (name for now)
 # * Should store a reference to the root Object on components so sub components dont need to use things like self.owner.owner
 # * Item stacking
-# * Mark map cells as not being walkable when inhabited by an actor, and mark the cell back to walkable when the actor moves
+# * Mark map cells as not being walkable when inhabited by an actor, and mark the cell back to walkable when the actor moves 
 # * Move item and monster placement chances into data files
 
 import libtcodpy as libtcod
