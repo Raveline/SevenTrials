@@ -2,7 +2,6 @@
 # - Mark map cells as not being walkable when inhabited by an actor, and mark the cell back to walkable when the actor moves 
 # - Item stacking
 # - Move item and monster placement chances into data files, will have to use a delimited string (no support for lists of lists)
-# - Character creation screen (just name entry for now)
 # - Menu should allow use of arrow keys
 # - Action menus (have multiple 'actions' in horizontal line at top.. you select an action from these to perform on the menu option you select)
 # - Time Management; Actors queue an action. Once enough world time has passed, the action occurs
@@ -13,16 +12,17 @@
 #     - wash, rinse, repeat
 # - Improve lighting support; should be able to define an arbitrary number of lights, maybe attach them to objects
 #	- Lights should use fov
-#	- Lights are currently not affecting tile character colors
-# - Quest givers should show an exclamation mark one tile above them (flashes, so it doesnt always cover up)
-
-# + Improved menus
-# + Basic Abilities implementation
-# + Player now emits light
-# + Camera class for rendering help
-# + Basic town map generation.. A grassy area with some buildings.
-# + Switched to the terminal font. So much beefier!
-# + Working doors (Implemented Interactive component)
+# - NPC's occaisionally wander into their doorways in the town map
+# - Message log
+# - Masteries
+# 	- Each level of a mastery awards score bonuses and/or an ability
+# - Generalized function for drawing a framed, optionally titled window to a given console
+# - Effects (enchantments, curses, etc.)
+# - Only display the ! flashing symbol if an npc is a quest giver
+# - Place down stairs in an npc quest givers building
+# - Tiles containing items should have some kind of background color highlight
+# - include Psyco
+# - Take stairs out of the global namespace, there needs to be a map.stairs[] list
 
 import libtcodpy as libtcod
 import math
@@ -58,13 +58,13 @@ MAX_ROOMS = 30
 
 FOV_ALGO = 0
 FOV_LIGHT_WALLS = True
-TORCH_RADIUS = 5
-TORCH_INTENSITY = 0.75
+TORCH_RADIUS = 10.0
+TORCH_INTENSITY = 0.25
 TORCH_COLOR = libtcod.Color(75, 75, 75)
 
-color_dark_wall = libtcod.Color(0, 0, 100)
+color_dark_wall = libtcod.Color(15, 15, 30)
 color_light_wall = libtcod.Color(130, 110, 50)
-color_dark_ground = libtcod.Color(50, 50, 150)
+color_dark_ground = libtcod.Color(10, 10, 10)
 color_light_ground = libtcod.Color(200, 180, 50)
 
 LEVEL_UP_BASE = 200
@@ -144,6 +144,9 @@ def handle_keys():
 					'\nAttack: ' + str(player.actor.get_score('power')) + 
 					'\nDefense: ' + str(player.actor.get_score('defense')), CHARACTER_SCREEN_WIDTH)
 
+			if key_char == 'M':
+				message_log()
+
 			return 'didnt-take-turn'
 
 def player_move_or_attack(dx, dy):
@@ -208,6 +211,18 @@ class Ability:
 		if self.use_function:
 			self.use_function()
 
+class Map:
+	def __init__(self, width, height, name=None, filled=True, ambient_light=0.0, full_bright=False):
+		self.width = width
+		self.height = height
+		self.ambient_light = ambient_light
+		self.full_bright = full_bright
+		self.name = name
+
+		self.grid = [[ Tile(filled)
+			for y in range(height) ]
+				for x in range(width) ]
+
 class Object:
 	def __init__(self, x, y, char, name, color, background_color=None, blocks=False, always_visible=False, actor=None, ai=None, item=None, interactive=None):
 		self.x = x
@@ -231,10 +246,24 @@ class Object:
 		if self.interactive:
 			self.interactive.owner = self
 
+		self.flash_char = None
+		self.flash_color = None
+		self.flash_counter = None
+
+	def flash_character(self, char=None, color=None):
+		self.flash_char = char
+		self.flash_color = color
+		self.flash_counter = 0.0
+
 	def move(self, dx, dy):
-		if not is_blocked(self.x + dx, self.y + dy):
-			self.x += dx
-			self.y += dy 
+		target_x = self.x + dx
+		target_y = self.y + dy
+		if (target_x < 0 or target_y < 0 or
+			target_x >= map.width or target_y >= map.height):
+			return
+		if not is_blocked(target_x, target_y):
+			self.x = target_x
+			self.y = target_y
 
 	def move_towards(self, target_x, target_y):
 
@@ -265,8 +294,8 @@ class Object:
 		if camera is not None:
 			draw_x -= camera.x
 			draw_y -= camera.y
-		if map_full_bright or (libtcod.map_is_in_fov(fov_map, self.x, self.y) or
-			(self.always_visible and map[self.x][self.y].explored)):
+		if map.full_bright or (libtcod.map_is_in_fov(fov_map, self.x, self.y) or
+			(self.always_visible and map.grid[self.x][self.y].explored)):
 			libtcod.console_set_default_foreground(con, self.color)
 			if self.background_color:
 				libtcod.console_set_default_background(con, self.background_color)
@@ -274,6 +303,13 @@ class Object:
 			else:
 				libtcod.console_set_background_flag(con, libtcod.BKGND_NONE)
 			libtcod.console_put_char(con, draw_x, draw_y, self.char)
+
+		if self.flash_char is not None:
+			value = math.sin(self.flash_counter)
+			if value > 0.0:
+				libtcod.console_set_default_foreground(con, self.flash_color)
+				libtcod.console_put_char(con, draw_x, draw_y-1, self.flash_char)
+			self.flash_counter += 0.5
 
 	def clear(self):
 		libtcod.console_put_char(con, self.x, self.y, ' ', libtcod.BKGND_NONE)
@@ -411,24 +447,18 @@ class Equipment:
 		if not equippable.owner.pick_up():
 			equippable.owner.drop()
 
-class BasicMonster:
-	def take_turn(self):
-		monster = self.owner
-		if libtcod.map_is_in_fov(fov_map, monster.x, monster.y):
-			if monster.distance_to(player) >= 2:
-				monster.move_towards(player.x, player.y)
-			elif player.actor.hp > 0:
-				monster.actor.attack(player)
-
-class BasicTownCitizen:
+class BasicAI:
 	def __init__(self, wander_rect=None):
 		self.wander_rect = wander_rect
 
 	def take_turn(self):
+		# wander randomly
 		dx = libtcod.random_get_int(0, -1, 1)
 		dy = libtcod.random_get_int(0, -1, 1)
 		if dx == 0 and dy == 0:
 			return
+
+		# but stay within my wander area if one is defined
 		if self.wander_rect is not None:
 			fx = self.owner.x + dx
 			fy = self.owner.y + dy
@@ -437,6 +467,14 @@ class BasicTownCitizen:
 
 		self.owner.move(dx, dy)
 
+class BasicMonster:
+	def take_turn(self):
+		monster = self.owner
+		if libtcod.map_is_in_fov(fov_map, monster.x, monster.y):
+			if monster.distance_to(player) >= 2:
+				monster.move_towards(player.x, player.y)
+			elif player.actor.hp > 0:
+				monster.actor.attack(player)
 
 class ConfusedMonster:
 	def __init__(self, old_ai, num_turns=CONFUSE_NUM_TURNS):
@@ -638,20 +676,11 @@ def make_map():
 	make_town_map()
 
 def make_town_map():
-	global map, player, objects, stairs, map_width, map_height, map_full_bright, ambient_light
-
-	map_full_bright = True
-	ambient_light = 0.8
+	global map, player, objects, stairs
 
 	objects = [player]
-	map_width = 150
-	map_height = 100
+	map = Map(width=150, height=100, filled=False, ambient_light=0.6, full_bright=True)
 
-	map = [[ Tile(False)
-		for y in range(map_height) ]
-			for x in range(map_width) ]
-
-	map_random = libtcod.random_new()
 	noise2d = libtcod.noise_new(2)
 	noise_octaves = 8.0
 	noise_zoom = 10.0
@@ -670,12 +699,12 @@ def make_town_map():
 		'"': 1
 	}
 
-	for x in range(map_width):
-		for y in range(map_height):
-			f = [noise_zoom * x / (2*map_width),
-				 noise_zoom * y / (2*map_height)]
+	for x in range(map.width):
+		for y in range(map.height):
+			f = [noise_zoom * x / (2*map.width),
+				 noise_zoom * y / (2*map.height)]
 			value = libtcod.noise_get_turbulence(noise2d, f, noise_octaves, libtcod.NOISE_WAVELET)
-			map[x][y].background_color = grassBGColorMap[int(64 * value)]
+			map.grid[x][y].background_color = grassBGColorMap[int(64 * value)]
 
 	building_min_width = 4
 	building_min_height = 4
@@ -689,8 +718,8 @@ def make_town_map():
 	while num_buildings < min_buildings:
 		bw = libtcod.random_get_int(0, building_min_width, building_max_width)
 		bh = libtcod.random_get_int(0, building_min_height, building_max_height)
-		bx = libtcod.random_get_int(0, 0, map_width - bw - 1)
-		by = libtcod.random_get_int(0, 0, map_height - bh - 1)
+		bx = libtcod.random_get_int(0, 0, map.width - bw - 1)
+		by = libtcod.random_get_int(0, 0, map.height - bh - 1)
 		rect = Rect(bx, by, bw, bh)
 		checkRect = Rect(rect.x1-1, rect.y1-1, rect.w+2, rect.h+2)
 		checkPass = True
@@ -704,15 +733,15 @@ def make_town_map():
 		for x in range(bx, bx+bw):
 			for y in range(by, by+bh):
 				if x == bx or x == (bx+bw-1) or y == by or y == (by+bh-1):
-					map[x][y].blocked = True
-					map[x][y].block_sight = True
-					map[x][y].background_color = libtcod.color_lerp(building_wall_colors[0], building_wall_colors[1], libtcod.random_get_float(0, 0, 1.0))
+					map.grid[x][y].blocked = True
+					map.grid[x][y].block_sight = True
+					map.grid[x][y].background_color = libtcod.color_lerp(building_wall_colors[0], building_wall_colors[1], libtcod.random_get_float(0, 0, 1.0))
 				else:
-					map[x][y].blocked = False
-					map[x][y].block_sight = False
-					map[x][y].background_color = libtcod.color_lerp(building_floor_colors[0], building_floor_colors[1], libtcod.random_get_float(0, 0, 1.0))
+					map.grid[x][y].blocked = False
+					map.grid[x][y].block_sight = False
+					map.grid[x][y].background_color = libtcod.color_lerp(building_floor_colors[0], building_floor_colors[1], libtcod.random_get_float(0, 0, 1.0))
 					if ((x+y) % 2) == 0:
-						map[x][y].background_color = map[x][y].background_color * 0.85
+						map.grid[x][y].background_color = map.grid[x][y].background_color * 0.85
 
 		num_doors = libtcod.random_get_int(0, 1, 3)
 		for i in range(num_doors):
@@ -731,9 +760,9 @@ def make_town_map():
 					door_x = bx + bw - 1
 				else:
 					door_x = bx
-			map[door_x][door_y].blocked = False
-			map[door_x][door_y].block_sight = False
-			map[door_x][door_y].background_color = building_floor_colors[0]
+			map.grid[door_x][door_y].blocked = False
+			map.grid[door_x][door_y].block_sight = False
+			map.grid[door_x][door_y].background_color = building_floor_colors[0]
 			door_interactive = InteractiveDoor()
 			door = Object(door_x, door_y, chr(197), 'door', libtcod.Color(98, 62, 9), background_color=libtcod.Color(163, 117, 49), blocks=True, interactive=door_interactive)
 			objects.append(door)
@@ -741,18 +770,19 @@ def make_town_map():
 		npc_x = libtcod.random_get_int(0, rect.x1+1, rect.x2-2)
 		npc_y = libtcod.random_get_int(0, rect.y1+1, rect.y2-2)
 		wander_rect = Rect(rect.x1+1, rect.y1+1, rect.w-2, rect.h-2)
-		npc_ai = BasicTownCitizen(wander_rect=wander_rect)
+		npc_ai = BasicAI(wander_rect=wander_rect)
 		npc_obj = Object(npc_x, npc_y, chr(2), 'Yizzt', libtcod.light_green, blocks=True, ai=npc_ai)
-		objects.append(npc_obj)			
+		npc_obj.flash_character('!', libtcod.yellow)
+		objects.append(npc_obj)
 
 		buildings.append(rect)
 		num_buildings += 1
 
-	for x in range(map_width):
-		for y in range(map_height):
+	for x in range(map.width):
+		for y in range(map.height):
 			grass_chance = 5
 
-			if map[x][y].background_character is not None:
+			if map.grid[x][y].background_character is not None:
 				grass_chance += 80
 
 			if libtcod.random_get_int(0, 0, 100) < grass_chance:
@@ -765,8 +795,8 @@ def make_town_map():
 					continue	
 
 				rand_color = libtcod.random_get_int(0, 0, 12)
-				map[x][y].background_character_color = grassFGColorMap[rand_color]
-				map[x][y].background_character = random_choice(grassFGCharacterChances)
+				map.grid[x][y].background_character_color = grassFGColorMap[rand_color]
+				map.grid[x][y].background_character = random_choice(grassFGCharacterChances)
 
 				if libtcod.random_get_int(0, 0, 100) < 75:
 					new_x = x + libtcod.random_get_int(0, -1, 1)
@@ -774,12 +804,12 @@ def make_town_map():
 
 					if new_x < 0:
 						new_x = 0
-					elif new_x >= map_width:
-						new_x = map_width - 1
+					elif new_x >= map.width:
+						new_x = map.width - 1
 					if new_y < 0:
 						new_y = 0
-					elif new_y >= map_height:
-						new_y = map_height - 1
+					elif new_y >= map.height:
+						new_y = map.height - 1
 
 					passCheck = True
 					for building in buildings:
@@ -790,19 +820,17 @@ def make_town_map():
 						continue										
 
 					rand_color = libtcod.random_get_int(0, 0, 12)
-					map[new_x][new_y].background_character_color = grassFGColorMap[rand_color]
-					map[new_x][new_y].background_character = random_choice(grassFGCharacterChances)					
+					map.grid[new_x][new_y].background_character_color = grassFGColorMap[rand_color]
+					map.grid[new_x][new_y].background_character = random_choice(grassFGCharacterChances)					
 
-	player.x = map_width / 2
-	player.y = map_height / 2
+	player.x = map.width / 2
+	player.y = map.height / 2
 
-
+	# generate and assign a name for our town
+	map.name = libtcod.namegen_generate("Mingos town")
 
 def make_dungeon_map():
-	global map, player, objects, stairs, map_width, map_height, map_full_bright, ambient_light
-
-	map_full_bright = False
-	ambient_light = 0.4
+	global map, player, objects, stairs
 
 	floorBGColorMapIndexes = [0, 8]
 	floorBGColorMapColors = [libtcod.Color(180, 134, 30), libtcod.Color(200, 180, 50)]
@@ -813,20 +841,16 @@ def make_dungeon_map():
 	wallBGColorMap = libtcod.color_gen_map(wallBGColorMapColors, wallBGColorMapIndexes)
 
 	objects = [player]
-	map_width = 150
-	map_height = 100
-
-	map = [[ Tile(True, bgColorMap=wallBGColorMap)
-		for y in range(map_height) ]
-			for x in range(map_width) ]
+	map = Map(width=150, height=100, filled=True, ambient_light=0.08, full_bright=False)
+	# map = [[ Tile(True, bgColorMap=wallBGColorMap)
 
 	rooms = []
 	num_rooms = 0
 	for r in range(MAX_ROOMS):
 		w = libtcod.random_get_int(0, ROOM_MIN_SIZE, ROOM_MAX_SIZE)
 		h = libtcod.random_get_int(0, ROOM_MIN_SIZE, ROOM_MAX_SIZE)
-		x = libtcod.random_get_int(0, 0, map_height - w - 1)
-		y = libtcod.random_get_int(0, 0, map_width - h - 1)
+		x = libtcod.random_get_int(0, 0, map.width - w - 1)
+		y = libtcod.random_get_int(0, 0, map.height - h - 1)
 		new_room = Rect(x, y, w, h)
 		failed = False
 		for other_room in rooms:
@@ -855,30 +879,39 @@ def make_dungeon_map():
 	stairs = Object(new_x, new_y, '>', 'stairs', libtcod.white, always_visible=True)
 	objects.append(stairs)
 
-def create_room(room, bgColorMap):
+def create_room(room, bgColorMap=None):
 	global map
 	for x in range(room.x1 + 1, room.x2):
 		for y in range(room.y1 + 1, room.y2):
-			map[x][y].blocked = False
-			map[x][y].block_sight = False
+			map.grid[x][y].blocked = False
+			map.grid[x][y].block_sight = False
 			random_index = libtcod.random_get_int(0, 0, 8)
-			map[x][y].background_color = bgColorMap[random_index]
+			if bgColorMap is not None:
+				map.grid[x][y].background_color = bgColorMap[random_index]
+			else:
+				map.grid[x][y].background_color = libtcod.dark_gray
 
-def create_h_tunnel(x1, x2, y, bgColorMap):
+def create_h_tunnel(x1, x2, y, bgColorMap=None):
 	global map;
 	for x in range(min(x1,x2), max(x1, x2) + 1):
-		map[x][y].blocked = False
-		map[x][y].block_sight = False
+		map.grid[x][y].blocked = False
+		map.grid[x][y].block_sight = False
 		random_index = libtcod.random_get_int(0, 0, 8)
-		map[x][y].background_color = bgColorMap[random_index]
+		if bgColorMap is not None:
+			map.grid[x][y].background_color = bgColorMap[random_index]
+		else:
+			map.grid[x][y].background_color = libtcod.dark_gray
 
-def create_v_tunnel(y1, y2, x, bgColorMap):
+def create_v_tunnel(y1, y2, x, bgColorMap=None):
 	global map
 	for y in range(min(y1,y2), max (y1,y2) + 1):
-		map[x][y].blocked = False
-		map[x][y].block_sight = False
+		map.grid[x][y].blocked = False
+		map.grid[x][y].block_sight = False
 		random_index = libtcod.random_get_int(0, 0, 8)
-		map[x][y].background_color = bgColorMap[random_index]
+		if bgColorMap is not None:
+			map.grid[x][y].background_color = bgColorMap[random_index]
+		else:
+			map.grid[x][y].background_color = libtcod.dark_gray
 
 def place_objects(room):
 	max_monsters = from_dungeon_level([[2, 1], [3, 4], [5, 6]])
@@ -932,7 +965,7 @@ def place_objects(room):
 			item.send_to_back()
 
 def is_blocked(x, y):
-	if map[x][y].blocked:
+	if map.grid[x][y].blocked:
 		return True
 
 	for object in objects:
@@ -948,27 +981,27 @@ def from_dungeon_level(table):
 	return 0
 
 def render_all():
-	global fov_map, fov_recompute, camera, ambient_light, map_width, map_height
+	global fov_map, fov_recompute, camera
 	global color_dark_wall, color_dark_ground, color_light_wall, color_light_ground
 	if fov_recompute:
 		fov_recompute = False
-		libtcod.map_compute_fov(fov_map, player.x, player.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGO)
+		libtcod.map_compute_fov(fov_map, player.x, player.y, int(TORCH_RADIUS), FOV_LIGHT_WALLS, libtcod.FOV_PERMISSIVE_8)
 
 	camera.update_position(player.x, player.y)
 	libtcod.console_clear(con)
 
 	for y in range(camera.y, (camera.y + camera.height)):
-		if y < 0 or y >= map_height:
+		if y < 0 or y >= map.height:
 			continue
 		draw_y = y - camera.y
 		for x in range(camera.x, (camera.x + camera.width)):
-			if x < 0 or x >= map_width:
+			if x < 0 or x >= map.width:
 				continue
 			draw_x = x - camera.x
 			visible = libtcod.map_is_in_fov(fov_map, x, y)
-			wall = map[x][y].block_sight
-			if not visible and not map_full_bright:
-				if map[x][y].explored:
+			wall = map.grid[x][y].block_sight
+			if not visible and not map.full_bright:
+				if map.grid[x][y].explored:
 					if wall:
 						libtcod.console_set_char_background(con, draw_x, draw_y, color_dark_wall, libtcod.BKGND_SET)
 					else:
@@ -978,32 +1011,34 @@ def render_all():
 					use_color = color_light_wall
 				else:
 					use_color = color_light_ground
-				if map[x][y].background_color:
-					use_color = map[x][y].background_color
+				if map.grid[x][y].background_color:
+					use_color = map.grid[x][y].background_color
 
-				use_color = use_color * ambient_light
-
+				final_value = map.ambient_light
 				radius = TORCH_RADIUS * 1.0
 				squared_radius = radius * radius;
+
 				if abs(player.x - x) <= radius and abs(player.y - y) <= radius:
-					distance = float(x - player.x) * (x - player.x) + (y - player.y) * (y - player.y)
-					if distance <= squared_radius:
-						light_color = TORCH_COLOR# * 0.4
-						l = (squared_radius - distance)	/ squared_radius
-						if l < 0.0:
-							l = 0.0
-						elif l > 1.0:
-							l = 1.0
-						l = l * TORCH_INTENSITY
-						#use_color = libtcod.color_lerp(use_color, light_color, l)
-						use_color = use_color + (light_color * l)
+					squared_distance = float(x - player.x) * (x - player.x) + (y - player.y) * (y - player.y)
+					if squared_distance <= squared_radius:
+						#light_color = TORCH_COLOR# * 0.4
+						coef1 = 1.0 / (1.0 + (squared_distance/20))
+						coef2 = coef1 - 1.0 / (1.0+squared_radius)
+						coef3 = coef2 / (1.0 - (1.0/(1.0+squared_radius)))
+						final_value = coef3
+						if final_value < map.ambient_light:
+							final_value = map.ambient_light
+						elif final_value > 1.0:
+							final_value = 1.0
 
-				libtcod.console_set_char_background(con, draw_x, draw_y, use_color, libtcod.BKGND_SET)
-				map[x][y].explored = True
+				final_color = use_color * final_value
 
-				if map[x][y].background_character is not None:
-					libtcod.console_set_default_foreground(con, map[x][y].background_character_color)
-					libtcod.console_put_char(con, draw_x, draw_y, map[x][y].background_character, libtcod.BKGND_NONE)
+				libtcod.console_set_char_background(con, draw_x, draw_y, final_color, libtcod.BKGND_SET)
+				map.grid[x][y].explored = True
+
+				if map.grid[x][y].background_character is not None:
+					libtcod.console_set_default_foreground(con, map.grid[x][y].background_character_color * final_value)
+					libtcod.console_put_char(con, draw_x, draw_y, map.grid[x][y].background_character, libtcod.BKGND_NONE)
 
 	for object in objects:
 		if object != player:
@@ -1210,7 +1245,8 @@ def main_menu():
 
 		if choice == 0:
 			new_game()
-			play_game()
+			if game_state is 'playing':
+				play_game()
 		elif choice == 1:
 			try:
 				load_game()
@@ -1222,15 +1258,131 @@ def main_menu():
 		elif choice == 2:
 			break
 
-def new_game():
-	global player, inventory, game_msgs, game_state, dungeon_level, pathfinder, camera, map_width, map_height, con
+def create_player():
+	global player, key, mouse
+	# con = libtcod.console_new(map_width, map_height)
 
-	dungeon_level = 1
-	game_msgs = []
-	inventory = []
+	noise2d = libtcod.noise_new(2)
+	noise_octaves = 8.0
+	noise_zoom = 7.5
+	noise_zoom2 = 10.0
+	bg_color = libtcod.Color(23, 28, 36)
+	noise_color = libtcod.Color(102, 108, 163)
+	noise_dx = 0.0
+	noise_dy = 0.0
+
+	name_prompt_con = libtcod.console_new(30, 6)
+	name_input = ''
+	name_prompt(name_prompt_con, name_input, width=30)
+
+
+	while True:
+		libtcod.console_set_default_background(panel, bg_color)
+		libtcod.console_clear(panel)	
+
+		noise_dy += 0.01
+
+		for y in range(SCREEN_HEIGHT):
+			for x in range(SCREEN_WIDTH):
+				f = [(noise_zoom * x / (2*SCREEN_WIDTH) + noise_dx), (noise_zoom * (y+(y*(y/(SCREEN_WIDTH/2)))) / (2*SCREEN_HEIGHT) + noise_dy)]
+				value = libtcod.noise_get_fbm(noise2d, f, noise_octaves, libtcod.NOISE_PERLIN)
+				color_index = (value + 1.0) / 2.0
+				color_index = color_index * float(y) / (SCREEN_HEIGHT / 2)
+				col = libtcod.color_lerp(bg_color, noise_color, color_index)
+
+				libtcod.console_set_char_background(panel, x, y, col, libtcod.BKGND_SET)
+
+		libtcod.console_blit(panel, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 0)	
+		libtcod.console_blit(name_prompt_con, 0, 0, 30, 6, 0, (SCREEN_WIDTH/2)-(30/2), (SCREEN_HEIGHT/2)-(6/2), 1.0, 0.7)
+		libtcod.console_flush()
+		libtcod.sys_check_for_event(libtcod.EVENT_KEY_PRESS|libtcod.EVENT_MOUSE, key, mouse)
+
+		if key.vk == libtcod.KEY_ESCAPE:
+			break
+		elif key.vk == libtcod.KEY_BACKSPACE:
+			name_input = name_input[:-1]
+			name_prompt(name_prompt_con, name_input, width=30)
+		elif key.vk == libtcod.KEY_CHAR:
+			name_input += chr(key.c)
+			name_prompt(name_prompt_con, name_input, width=30)
+		elif key.vk == libtcod.KEY_ENTER:
+			return name_input
+
+def name_prompt(window, name_input, width=30):
+	header = "Enter A Name"
+	name_input += "_"
+	header_height = 3
+	height = 3 + header_height
+
+	# render bg and frame
+	libtcod.console_set_default_background(window, MENU_BACKGROUND_COLOR)
+	libtcod.console_set_default_foreground(window, libtcod.Color(219, 209, 158))
+	libtcod.console_print_frame(window, 0, 0, width, height, clear=True, flag=libtcod.BKGND_SET)
+	libtcod.console_set_default_foreground(window, MENU_TEXT_COLOR)
+
+	# render header
+	libtcod.console_set_alignment(window, libtcod.CENTER)
+	libtcod.console_set_default_background(window, MENU_HEADER_BACKGROUND_COLOR)
+	libtcod.console_set_default_foreground(window, MENU_HEADER_TEXT_COLOR)
+	libtcod.console_rect(window, 1, 1, width-2, 1, True, libtcod.BKGND_SET)
+	libtcod.console_print_rect(window, width/2, 1, width-2, height, header)
+	libtcod.console_set_alignment(window, libtcod.LEFT)
+
+	draw_x = 2
+	draw_y = header_height
+
+	# render text box
+	libtcod.console_set_default_background(window, libtcod.black)
+	libtcod.console_rect(window, draw_x, draw_y, width-4, 1, True, libtcod.BKGND_SET)
+	libtcod.console_print_ex(window, draw_x, draw_y, libtcod.BKGND_NONE, libtcod.LEFT, name_input)
+
+def message_log():
+	global key, mouse
+	header = "Message Log"
+	header_height = 3
+	width = SCREEN_WIDTH - 10
+	height = (SCREEN_HEIGHT - 10)
+
+	window = libtcod.console_new(width, height)	
+
+	# render bg and frame
+	libtcod.console_set_default_background(window, MENU_BACKGROUND_COLOR)
+	libtcod.console_set_default_foreground(window, libtcod.Color(219, 209, 158))
+	libtcod.console_print_frame(window, 0, 0, width, height, clear=True, flag=libtcod.BKGND_SET)
+	libtcod.console_set_default_foreground(window, MENU_TEXT_COLOR)
+
+	# render header
+	libtcod.console_set_alignment(window, libtcod.CENTER)
+	libtcod.console_set_default_background(window, MENU_HEADER_BACKGROUND_COLOR)
+	libtcod.console_set_default_foreground(window, MENU_HEADER_TEXT_COLOR)
+	libtcod.console_rect(window, 1, 1, width-2, 1, True, libtcod.BKGND_SET)
+	libtcod.console_print_rect(window, width/2, 1, width-2, height, header)
+	libtcod.console_set_alignment(window, libtcod.LEFT)
+
+	x = 2
+	y = 3
+
+	# TODO: Display actual message log contents
+
+	while True:
+		render_all()
+		libtcod.console_blit(window, 0, 0, width, height, 0, 5, 5, 1.0, 0.7)
+		libtcod.console_flush()
+		libtcod.sys_check_for_event(libtcod.EVENT_KEY_PRESS|libtcod.EVENT_MOUSE, key, mouse)
+
+		if key.vk == libtcod.KEY_ESCAPE:
+			return
+
+def new_game():
+	global player, inventory, game_msgs, game_state, dungeon_level, pathfinder, camera, con
+
+	player_name = create_player()
+	if player_name is None:
+		game_state = 'cancelled'
+		return
+
 	player_equip_slots = ["head", "torso"]
 	player_equipment_component = Equipment(equip_slots=player_equip_slots)
-
 	tmpData = ability_data['lightning strike']
 	use_function = None
 	if 'use_function' in tmpData:
@@ -1238,14 +1390,18 @@ def new_game():
 	lightning_ability = Ability(tmpData['name'], use_function=use_function)
 	player_abilities = [lightning_ability]
 	player_actor_component = Actor(xp=0, hp=100, defense=1, power=4, death_function=player_death, equipment=player_equipment_component, abilities=player_abilities)
-	player = Object(0, 0, '@', 'player', libtcod.white, blocks=True, actor=player_actor_component)
+	player = Object(0, 0, '@', player_name, libtcod.white, blocks=True, actor=player_actor_component)
 	player.level = 1
+
+	dungeon_level = 1
+	game_msgs = []
+	inventory = []
 	game_state = 'playing'
 
 	camera = Camera(0, 0, width=SCREEN_WIDTH, height=43)
 	camera.update_position(player.x, player.y)
 	con = libtcod.console_new(camera.width, camera.height)	
-	make_map()
+	make_town_map()
 	initialize_fov()
 	if pathfinder is not None:
 		libtcod.path_delete(pathfinder)
@@ -1255,12 +1411,12 @@ def new_game():
 
 
 def initialize_fov():
-	global fov_recompute, fov_map, map_width, map_height
+	global fov_recompute, fov_map
 	fov_recompute = True
-	fov_map = libtcod.map_new(map_width, map_height)
-	for y in range(map_height):
-		for x in range(map_width):
-			libtcod.map_set_properties(fov_map, x, y, not map[x][y].block_sight, not map[x][y].blocked)
+	fov_map = libtcod.map_new(map.width, map.height)
+	for y in range(map.height):
+		for x in range(map.width):
+			libtcod.map_set_properties(fov_map, x, y, not map.grid[x][y].block_sight, not map.grid[x][y].blocked)
 	libtcod.console_clear(con)
 
 
@@ -1319,6 +1475,8 @@ def load_game():
 
 def load_data():
 	parser = libtcod.parser_new()
+
+	# load monster data
 	monsterStruct = libtcod.parser_new_struct(parser, 'monster')
 	libtcod.struct_add_property(monsterStruct, 'name', libtcod.TYPE_STRING, True)
 	libtcod.struct_add_property(monsterStruct, 'character', libtcod.TYPE_CHAR, True)
@@ -1329,6 +1487,8 @@ def load_data():
 	libtcod.struct_add_property(monsterStruct, 'power', libtcod.TYPE_INT, True)
 	libtcod.struct_add_property(monsterStruct, 'death_function', libtcod.TYPE_STRING, True)
 	libtcod.parser_run(parser, os.path.join('data', 'monster_data.cfg'), MonsterDataListener())
+
+	# load item data
 	itemStruct = libtcod.parser_new_struct(parser, 'item')
 	libtcod.struct_add_property(itemStruct, 'name', libtcod.TYPE_STRING, True)
 	libtcod.struct_add_property(itemStruct, 'character', libtcod.TYPE_CHAR, True)
@@ -1337,10 +1497,18 @@ def load_data():
 	libtcod.struct_add_property(itemStruct, 'equip_slot', libtcod.TYPE_STRING, False)
 	libtcod.struct_add_list_property(itemStruct, 'equip_score_bonuses', libtcod.TYPE_STRING, False)
 	libtcod.parser_run(parser, os.path.join('data', 'item_data.cfg'), ItemDataListener())
+
+	# load abilities data
 	abilityStruct = libtcod.parser_new_struct(parser, 'ability')
 	libtcod.struct_add_property(abilityStruct, 'name', libtcod.TYPE_STRING, True)
 	libtcod.struct_add_property(abilityStruct, 'use_function', libtcod.TYPE_STRING, False)
 	libtcod.parser_run(parser, os.path.join('data', 'ability_data.cfg'), AbilityDataListener())
+
+	# load name generation data
+	for file in os.listdir('data/namegen'):
+		if file.find('.cfg') > 0:
+			libtcod.namegen_parse(os.path.join('data', 'namegen', file))
+	namegen_sets = libtcod.namegen_get_sets()
 
 class MonsterDataListener:
     def new_struct(self, struct, name):
@@ -1436,11 +1604,11 @@ class AbilityDataListener:
         return True
 
 class Camera:
-	def __init__(self, x=0, y=0, width=None, height=None, track_threshold=5):
+	def __init__(self, x=0, y=0, width=None, height=None, track_threshold=10):
 		if width is None:
-			width = map_width
+			width = SCREEN_WIDTH
 		if height is None:
-			height = map_height
+			height = SCREEN_HEIGHT
 		self.width = width
 		self.height = height
 		self.x = x
@@ -1459,20 +1627,19 @@ class Camera:
 
 		if self.x < 0:
 			self.x = 0
-		elif (self.x + self.width) > map_width:
-			self.x = map_width - self.width
+		elif (self.x + self.width) > map.width:
+			self.x = map.width - self.width
 		if self.y < 0:
 			self.y = 0
-		elif (self.y + self.height) > map_height:
-			self.y = map_height - self.height
+		elif (self.y + self.height) > map.height:
+			self.y = map.height - self.height
 
 	def is_visible(self, position_x, position_y):
 		return (self.x <= position_x and (self.x + self.width) >= position_x and
 				self.y <= position_y and (self.y + self.height) >= position_y)
 
 libtcod.console_set_custom_font("terminal8x12_gs_ro.png", libtcod.FONT_TYPE_GREYSCALE | libtcod.FONT_LAYOUT_ASCII_INROW)
-
-libtcod.console_init_root(SCREEN_WIDTH, SCREEN_HEIGHT, 'FirstRL', False)
+libtcod.console_init_root(SCREEN_WIDTH, SCREEN_HEIGHT, 'Seven Trials', False)
 libtcod.sys_set_fps(LIMIT_FPS)
 key=libtcod.Key()
 mouse=libtcod.Mouse()
@@ -1480,14 +1647,13 @@ mouse=libtcod.Mouse()
 panel = libtcod.console_new(SCREEN_WIDTH, SCREEN_HEIGHT)
 
 pathfinder = None
+camera = None
+con = libtcod.console_new(5, 5)
+
 ability_data = {}
 item_data = {}
 monster_data = {}
-camera = None
-map_full_bright = False
-map_width = 50
-map_height = 50
-con = libtcod.console_new(map_width, map_height)
-
+namegen_sets = None
 load_data()
+
 main_menu()
