@@ -1,29 +1,3 @@
-# - Seperate code into multiple files
-# - Mark map cells as not being walkable when inhabited by an actor, and mark the cell back to walkable when the actor moves 
-# - Item stacking
-# - Move item and monster placement chances into data files, will have to use a delimited string (no support for lists of lists)
-# - Menu should allow use of arrow keys
-# - Action menus (have multiple 'actions' in horizontal line at top.. you select an action from these to perform on the menu option you select)
-# - Time Management; Actors queue an action. Once enough world time has passed, the action occurs
-#     - timePasses()
-#     - retrieve action from queue with lowest amount of time left on it
-#     - action occurs and is processed
-#     - time action had remaining is subtracted from all queued actions
-#     - wash, rinse, repeat
-# - Improve lighting support; should be able to define an arbitrary number of lights, maybe attach them to objects
-#	- Lights should use fov
-# - NPC's occaisionally wander into their doorways in the town map
-# - Message log
-# - Masteries
-# 	- Each level of a mastery awards score bonuses and/or an ability
-# - Generalized function for drawing a framed, optionally titled window to a given console
-# - Effects (enchantments, curses, etc.)
-# - Only display the ! flashing symbol if an npc is a quest giver
-# - Place down stairs in an npc quest givers building
-# - Tiles containing items should have some kind of background color highlight
-# - include Psyco
-# - Take stairs out of the global namespace, there needs to be a map.stairs[] list
-
 import libtcodpy as libtcod
 import math
 import os
@@ -78,6 +52,11 @@ HEAL_AMOUNT = 40
 LIGHTNING_RANGE = 5
 LIGHTNING_DAMAGE = 40
 
+DIR_NORTH = 0
+DIR_EAST = 1
+DIR_SOUTH = 2
+DIR_WEST = 3
+
 def handle_keys():
 	global fov_recompute, key, mouse
  
@@ -130,8 +109,10 @@ def handle_keys():
 					chosen_item.drop()
 
 			if key_char == '>':
-				if stairs.x == player.x and stairs.y == player.y:
-					next_level()
+				for stairs_obj in map.stairs:
+					if stairs_obj.x == player.x and stairs_obj.y == player.y:
+						# TODO: Stairs object should be determining where to go from here..
+						next_level()
 
 			if key_char == 'c':
 				level_up_xp = LEVEL_UP_BASE + player.level * LEVEL_UP_FACTOR
@@ -218,10 +199,17 @@ class Map:
 		self.ambient_light = ambient_light
 		self.full_bright = full_bright
 		self.name = name
+		self.stairs = []
 
 		self.grid = [[ Tile(filled)
 			for y in range(height) ]
 				for x in range(width) ]
+
+class Stairs:
+	def __init__(self, x, y, obj_index=None):
+		self.x = x
+		self.y = y
+		self.obj_index = obj_index
 
 class Object:
 	def __init__(self, x, y, char, name, color, background_color=None, blocks=False, always_visible=False, actor=None, ai=None, item=None, interactive=None):
@@ -605,7 +593,6 @@ def closest_monster(max_range):
 
 	return closest_enemy
 
-
 def random_choice_index(chances):
 	dice = libtcod.random_get_int(0, 1, sum(chances))
 	running_sum = 0
@@ -616,12 +603,15 @@ def random_choice_index(chances):
 			return choice
 		choice += 1
 
-
 def random_choice(chances_dict):
 	chances = chances_dict.values()
 	strings = chances_dict.keys()
 	return strings[random_choice_index(chances)]
 
+def random_direction():
+	dirs = [DIR_NORTH, DIR_EAST, DIR_SOUTH, DIR_WEST]
+	chances = [1,1,1,1]
+	return dirs[random_choice_index(chances)]
 
 class Tile:
 	def __init__(self, blocked, block_sight=None, background_color=None, bgColorMap=None, background_character=None, background_character_color=None):
@@ -672,11 +662,11 @@ def next_level():
 
 
 def make_map():
-	# make_dungeon_map()
-	make_town_map()
+	make_dungeon_map()
+	# make_town_map()
 
 def make_town_map():
-	global map, player, objects, stairs
+	global map, player, objects
 
 	objects = [player]
 	map = Map(width=150, height=100, filled=False, ambient_light=0.6, full_bright=True)
@@ -706,9 +696,9 @@ def make_town_map():
 			value = libtcod.noise_get_turbulence(noise2d, f, noise_octaves, libtcod.NOISE_WAVELET)
 			map.grid[x][y].background_color = grassBGColorMap[int(64 * value)]
 
-	building_min_width = 4
-	building_min_height = 4
-	building_max_width = 12
+	building_min_width = 8
+	building_min_height = 8
+	building_max_width = 18
 	building_max_height = 12
 	building_floor_colors = [libtcod.Color(42, 52, 65), libtcod.Color(44, 59, 80)]
 	building_wall_colors = [libtcod.Color(53, 71, 95), libtcod.Color(58, 83, 116)]
@@ -742,6 +732,8 @@ def make_town_map():
 					map.grid[x][y].background_color = libtcod.color_lerp(building_floor_colors[0], building_floor_colors[1], libtcod.random_get_float(0, 0, 1.0))
 					if ((x+y) % 2) == 0:
 						map.grid[x][y].background_color = map.grid[x][y].background_color * 0.85
+
+		map_add_room_dungeon_entrace(rect)
 
 		num_doors = libtcod.random_get_int(0, 1, 3)
 		for i in range(num_doors):
@@ -829,8 +821,42 @@ def make_town_map():
 	# generate and assign a name for our town
 	map.name = libtcod.namegen_generate("Mingos town")
 
+def map_add_room_dungeon_entrace(room):
+	global map
+	rand_dir = random_direction()
+	rand_x = libtcod.random_get_int(0, room.x1+2, room.x2-6)
+	rand_y = libtcod.random_get_int(0, room.y1+2, room.y2-6)
+
+	cell_queue = []
+
+	if rand_dir is DIR_SOUTH:
+		cell_queue = [(rand_x, rand_y), (rand_x+1, rand_y), (rand_x+2, rand_y), (rand_x, rand_y+1), (rand_x+2, rand_y+1), (rand_x, rand_y+2), (rand_x+2, rand_y+2)]
+	elif rand_dir is DIR_NORTH:
+		cell_queue = [(rand_x, rand_y), (rand_x+2, rand_y), (rand_x, rand_y+1), (rand_x+2, rand_y+1), (rand_x, rand_y+2), (rand_x+1, rand_y+2), (rand_x+2, rand_y+2)]
+	elif rand_dir is DIR_WEST:
+		cell_queue = [(rand_x, rand_y), (rand_x, rand_y+2), (rand_x+1, rand_y), (rand_x+1, rand_y+2), (rand_x+2, rand_y), (rand_x+2, rand_y+1), (rand_x+2, rand_y+2)]
+	elif rand_dir is DIR_EAST:
+		cell_queue = [(rand_x, rand_y), (rand_x, rand_y+1), (rand_x, rand_y+2), (rand_x+1, rand_y), (rand_x+1, rand_y+2), (rand_x+2, rand_y), (rand_x+2, rand_y+2)]
+
+	stair_x = rand_x + 1
+	stair_y = rand_y + 1
+	fill_char = chr(176)
+	fill_char = chr(240)
+
+	for (cell_x, cell_y) in cell_queue:
+		map.grid[cell_x][cell_y].background_character = fill_char
+		map.grid[cell_x][cell_y].background_color = libtcod.Color(133, 133, 133)
+		map.grid[cell_x][cell_y].background_character_color = libtcod.Color(83, 83, 83)
+		map.grid[cell_x][cell_y].blocked = True
+
+	# TODO: place a real stair object
+	stairs_obj = Object(stair_x, stair_y, '>', 'stairs', libtcod.white, always_visible=True)
+	objects.append(stairs_obj)
+	map.stairs.append(Stairs(stair_x, stair_y))	
+
+
 def make_dungeon_map():
-	global map, player, objects, stairs
+	global map, player, objects
 
 	floorBGColorMapIndexes = [0, 8]
 	floorBGColorMapColors = [libtcod.Color(180, 134, 30), libtcod.Color(200, 180, 50)]
@@ -876,8 +902,10 @@ def make_dungeon_map():
 			rooms.append(new_room)
 			num_rooms += 1
 
-	stairs = Object(new_x, new_y, '>', 'stairs', libtcod.white, always_visible=True)
-	objects.append(stairs)
+	stairs_obj = Object(new_x, new_y, '>', 'stairs', libtcod.white, always_visible=True)
+	objects.append(stairs_obj)
+	map.stairs.append(Stairs(new_x, new_y))
+
 
 def create_room(room, bgColorMap=None):
 	global map
@@ -988,6 +1016,7 @@ def render_all():
 		libtcod.map_compute_fov(fov_map, player.x, player.y, int(TORCH_RADIUS), FOV_LIGHT_WALLS, libtcod.FOV_PERMISSIVE_8)
 
 	camera.update_position(player.x, player.y)
+	libtcod.console_set_default_background(con, libtcod.black)
 	libtcod.console_clear(con)
 
 	for y in range(camera.y, (camera.y + camera.height)):
@@ -1448,9 +1477,9 @@ def play_game():
 def save_game():
 	file = shelve.open('savegame', 'n')
 	file['map'] = map
+	file['camera'] = camera
 	file['objects'] = objects
 	file['player_index'] = objects.index(player)
-	file['stairs_index'] = objects.index(stairs)
 	file['dungeon_level'] = dungeon_level
 	file['inventory'] = inventory
 	file['game_msgs'] = game_msgs
@@ -1458,19 +1487,20 @@ def save_game():
 	file.close()
 
 def load_game():
-	global map, objects, player, inventory, game_msgs, game_state, stairs, dungeon_level
+	global map, camera, objects, player, inventory, game_msgs, game_state, dungeon_level, con
 
 	file = shelve.open('savegame', 'r')
 	map = file['map']
+	camera = file['camera']
 	objects = file['objects']
 	player = objects[file['player_index']]
-	stairs = objects[file['stairs_index']]
 	dungeon_level = file['dungeon_level']
 	inventory = file['inventory']
 	game_msgs = file['game_msgs']
 	game_state = file['game_state']
 	file.close()
 
+	con = libtcod.console_new(camera.width, camera.height)
 	initialize_fov()
 
 def load_data():
