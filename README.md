@@ -3,6 +3,10 @@ SevenTrials
 
 Roguelike game made with python and libtcod.
 
+Story
+-----
+The Gods have selected you to be a champion of the mortal realm, tasked with ridding the world of a vile corruption. You must travel the towns and villages of the land, performing in each seven tasks. Once this is done, the Gods, appeased with your devotion, will spare that area from its otherwise inevitable destruction.
+
 
 **Most recent changes:**
 * Now placing stair features in buildings in the town
