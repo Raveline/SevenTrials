@@ -1,8 +1,12 @@
 import libtcodpy as libtcod
 import math
 import os
+import pprint
+import random
 import shelve
+import string
 import textwrap
+import uuid
 
 SCREEN_WIDTH = 120
 SCREEN_HEIGHT = 50
@@ -18,13 +22,19 @@ MSG_HEIGHT = PANEL_HEIGHT - 1
 
 MENU_BACKGROUND_COLOR = libtcod.Color(160, 147, 106)
 MENU_TEXT_COLOR = libtcod.white
+MENU_SELECTED_COLOR = libtcod.black
+MENU_SELECTED_BACKGROUND_COLOR = libtcod.white
 MENU_HEADER_TEXT_COLOR = libtcod.white
 MENU_HEADER_BACKGROUND_COLOR = libtcod.darker_sepia
+MENU_FRAME_COLOR = libtcod.Color(219, 209, 158)
 ABILITIES_WIDTH = 50
 CHARACTER_SCREEN_WIDTH = 30
 INVENTORY_WIDTH = 50
 LEVEL_SCREEN_WIDTH = 40
 EQUIPMENT_WIDTH = 50
+
+POSITIVE_BONUS_TEXT_COLOR = libtcod.Color(58, 228, 64)
+NEGATIVE_BONUS_TEXT_COLOR = libtcod.Color(255, 12, 16)
 
 ROOM_MAX_SIZE = 10
 ROOM_MIN_SIZE = 6
@@ -80,7 +90,7 @@ def handle_keys():
 			key_char = chr(key.c)
 
 			if key_char == 'g':
-				for object in objects:
+				for object in map.objects:
 					if object.x == player.x and object.y == player.y and object.item:
 						object.item.pick_up()
 						break;
@@ -111,8 +121,7 @@ def handle_keys():
 			if key_char == '>':
 				for stairs_obj in map.stairs:
 					if stairs_obj.x == player.x and stairs_obj.y == player.y:
-						# TODO: Stairs object should be determining where to go from here..
-						next_level()
+						stairs_obj.use()
 
 			if key_char == 'c':
 				level_up_xp = LEVEL_UP_BASE + player.level * LEVEL_UP_FACTOR
@@ -122,8 +131,8 @@ def handle_keys():
 					'\nExperience: ' + str(player.actor.xp) +
 					'\nExperience to level up: ' + str(level_up_xp) +
 					'\n\nMaximum HP: ' + str(player.actor.max_hp) + 
-					'\nAttack: ' + str(player.actor.get_score('power')) + 
-					'\nDefense: ' + str(player.actor.get_score('defense')), CHARACTER_SCREEN_WIDTH)
+					'\nAttack: ' + str(player.actor.get_rating('power')) + 
+					'\nDefense: ' + str(player.actor.get_rating('defense')), CHARACTER_SCREEN_WIDTH)
 
 			if key_char == 'M':
 				message_log()
@@ -138,7 +147,7 @@ def player_move_or_attack(dx, dy):
 
 	attack_target = None
 	interact_target = None
-	for object in objects:
+	for object in map.objects:
 		if object.x == x and object.y == y:
 			if object.actor:
 				attack_target = object
@@ -192,24 +201,55 @@ class Ability:
 		if self.use_function:
 			self.use_function()
 
+class World:
+	def __init__(self):
+		self.maps = []
+
+	def add_map(self, new_map):
+		#self.maps[new_map.uid] = new_map
+		self.maps.append(new_map)
+
 class Map:
-	def __init__(self, width, height, name=None, filled=True, ambient_light=0.0, full_bright=False):
+	def __init__(self, width, height, name="Unknown", filled=True, ambient_light=0.0, full_bright=False, uid=None, objects=None):
+		self.uid = uid
+		if self.uid is None:
+			self.uid = str(uuid.uuid4())
 		self.width = width
 		self.height = height
 		self.ambient_light = ambient_light
 		self.full_bright = full_bright
 		self.name = name
 		self.stairs = []
-
+		self.objects = []
 		self.grid = [[ Tile(filled)
 			for y in range(height) ]
 				for x in range(width) ]
 
 class Stairs:
-	def __init__(self, x, y, obj_index=None):
+	def __init__(self, x, y, obj_index=None, target_map_index=None):
 		self.x = x
 		self.y = y
 		self.obj_index = obj_index
+		self.target_map_index = target_map_index
+		self.target_stair_index = 0
+
+	def use(self):
+		global world, map, player
+		if self.target_map_index is None:
+			current_map_index = world.maps.index(map)
+			my_stair_index = map.stairs.index(self)
+			make_dungeon_map()
+			world.add_map(map)
+			self.target_map_index = len(world.maps) - 1
+			stair_obj = map.stairs[self.target_stair_index]
+			stair_obj.target_map_index = current_map_index
+			stair_obj.target_stair_index = my_stair_index
+		else:
+			map = world.maps[self.target_map_index]
+		stair_obj = map.stairs[self.target_stair_index]
+		player.x = stair_obj.x
+		player.y = stair_obj.y
+		initialize_fov()		
 
 class Object:
 	def __init__(self, x, y, char, name, color, background_color=None, blocks=False, always_visible=False, actor=None, ai=None, item=None, interactive=None):
@@ -234,14 +274,27 @@ class Object:
 		if self.interactive:
 			self.interactive.owner = self
 
-		self.flash_char = None
-		self.flash_color = None
-		self.flash_counter = None
+		self.do_flash = False
+		self.do_hostile_bg = False
 
 	def flash_character(self, char=None, color=None):
+		if char is None:
+			self.do_flash = False
+			return
+		self.do_flash = True
 		self.flash_char = char
 		self.flash_color = color
 		self.flash_counter = 0.0
+		self.flash_rate = 0.5
+
+	def hostile_bg_effect(self, toggle):
+		if toggle is False:
+			self.do_hostile_bg = False
+			return
+		self.do_hostile_bg = True
+		self.hostile_bg_color = libtcod.Color(202, 42, 33)
+		self.hostile_bg_counter = 0.0
+		self.hostile_bg_rate = 0.5
 
 	def move(self, dx, dy):
 		target_x = self.x + dx
@@ -288,24 +341,32 @@ class Object:
 			if self.background_color:
 				libtcod.console_set_default_background(con, self.background_color)
 				libtcod.console_set_background_flag(con, libtcod.BKGND_SET)
+			elif self.do_hostile_bg is True:
+				value = (math.sin(self.hostile_bg_counter) + 1.0) / 2
+				libtcod.console_set_default_background(con, libtcod.color_lerp(map.grid[self.x][self.y].background_color, self.hostile_bg_color, value))
+				libtcod.console_set_background_flag(con, libtcod.BKGND_SET)
+				self.hostile_bg_counter += self.hostile_bg_rate
+				if self.hostile_bg_counter > (math.pi * 2):
+					self.hostile_bg_counter -= (math.pi * 2)
 			else:
 				libtcod.console_set_background_flag(con, libtcod.BKGND_NONE)
 			libtcod.console_put_char(con, draw_x, draw_y, self.char)
 
-		if self.flash_char is not None:
+		if self.do_flash is True:
 			value = math.sin(self.flash_counter)
 			if value > 0.0:
 				libtcod.console_set_default_foreground(con, self.flash_color)
 				libtcod.console_put_char(con, draw_x, draw_y-1, self.flash_char)
-			self.flash_counter += 0.5
+			self.flash_counter += self.flash_rate
+			if self.flash_counter > (math.pi * 2):
+				self.flash_counter -= (math.pi * 2)
 
 	def clear(self):
 		libtcod.console_put_char(con, self.x, self.y, ' ', libtcod.BKGND_NONE)
 
 	def send_to_back(self):
-		global objects
-		objects.remove(self)
-		objects.insert(0, self)
+		map.objects.remove(self)
+		map.objects.insert(0, self)
 
 class Interactive:
 	def __init__(self, use_function=None, use_on_bump=False):
@@ -338,7 +399,7 @@ class InteractiveDoor:
 			self.use_on_bump = True
 
 class Actor:
-	def __init__(self, hp, defense, power, xp, death_function=None, equipment=None, abilities=None):
+	def __init__(self, hp, defense, power, xp, death_function=None, equipment=None, abilities=[]):
 		self.max_hp = hp
 		self.hp = hp
 		self.defense = defense
@@ -363,27 +424,37 @@ class Actor:
 		ability.owner = self
 		self.abilities.append(ability)
 
-	def get_score(self, value_name):
-		score = 0
-		if hasattr(self, value_name):
-			score = getattr(self, value_name)
+	def add_rating(self, rating_name, amount):
+		if hasattr(self, rating_name):
+			rating = getattr(self, rating_name)
+			if rating is None:
+				rating = 0
+			setattr(self, rating_name, rating + amount)
+		else:
+			setattr(self, rating_name, amount)
+
+	def get_rating(self, rating_name):
+		rating = 0
+		if hasattr(self, rating_name):
+			rating = getattr(self, rating_name)
 
 		# TODO: this is also where you would want to factor in bonuses from equipment and effects and such
 		# Factor in bonuses from equipment
 		if self.equipment:
 			for slot_name in self.equipment.slots:
 				equippable = self.equipment.slots[slot_name]
-				eq_bonus = equippable.score_bonuses.get(value_name)
+				eq_bonus = equippable.rating_bonuses.get(rating_name)
 				if eq_bonus is not None:
-					score += eq_bonus
+					rating += eq_bonus
 
-		return score
+		return rating
 
 	def take_damage(self, damage):
 		if damage > 0:
 			self.hp -= damage
 
 		if self.hp <= 0:
+			self.owner.do_flash = False
 			function = self.death_function
 			if function is not None:
 				function(self.owner)
@@ -392,7 +463,7 @@ class Actor:
 			player.actor.xp != self.xp
 
 	def attack(self, target):
-		damage = self.get_score('power') - target.actor.get_score('defense')
+		damage = self.get_rating('power') - target.actor.get_rating('defense')
 
 		if damage > 0:
 			message(self.owner.name.capitalize() + ' attacks ' + target.name + ' for ' + str(damage) + ' hit points.')
@@ -493,13 +564,13 @@ class Item:
 			return False
 		else:
 			inventory.append(self.owner)
-			if self.owner in objects:
-				objects.remove(self.owner)
+			if self.owner in map.objects:
+				map.objects.remove(self.owner)
 			message('You picked up a ' + self.owner.name + '!', libtcod.green)
 			return True
 
 	def drop(self):
-		objects.append(self.owner)
+		map.objects.append(self.owner)
 		inventory.remove(self.owner)
 		self.owner.x = player.x
 		self.owner.y = player.y
@@ -518,9 +589,9 @@ class Item:
 				inventory.remove(self.owner)
 
 class Equippable:
-	def __init__(self, equip_slot=None, score_bonuses=None):
+	def __init__(self, equip_slot=None, rating_bonuses=None):
 		self.equip_slot = equip_slot
-		self.score_bonuses = score_bonuses
+		self.rating_bonuses = rating_bonuses
 
 def player_death(player):
 	global game_state
@@ -529,6 +600,29 @@ def player_death(player):
 	player.char = '%'
 	player.color = libtcod.dark_red
 
+def player_add_skill(skillObj):
+	global player
+	hasSkillObj = player.skills.get(skillObj['name'], None)
+	if hasSkillObj is not None:
+		player.skills[skillObj['name']] += 1
+	else:
+		player.skills[skillObj['name']] = 1
+
+	# fetch the skillRank which matches our new level in this skill
+	rankObj = skillObj['ranks'].get(player.skills[skillObj['name']], None)
+	if rankObj is not None:
+		# apply any rating bonuses attached to the skillRank
+		rating_bonuses = rankObj.get('rating_bonuses', None)
+		if rating_bonuses is not None and len(rating_bonuses) > 0:
+			for bonusObj in rating_bonuses:
+				player.actor.add_rating(bonusObj['rating'], bonusObj['bonus'])
+		# add any new abilities attached to the skillRank
+		abilities = rankObj.get('gives_abilities', None)
+		if abilities is not None and len(abilities) > 0:
+			for abilityObj in abilities:
+				tmpData = ability_data[abilityObj['name']]
+				ability = Ability(tmpData['name'], use_function=tmpData['use_function'])
+				player.actor.add_ability(ability)
 
 def monster_death(monster):
 	message(monster.name.capitalize() + ' is dead! You gain ' + str(monster.actor.xp) + ' experience points.', libtcod.orange)
@@ -575,7 +669,7 @@ def cast_fireball():
 	if x is None: return 'cancelled'
 	message('The fireball explodes, burning everything within ' + str(FIREBALL_RADIUS) + ' tiles!', libtcod.orange)
 
-	for obj in objects:
+	for obj in map.objects:
 		if obj.distance(x, y) <= FIREBALL_RADIUS and obj.actor:
 			message('The ' + obj.name + ' gets burned for ' + str(FIREBALL_DAMAGE) + ' hit points.', libtcod.orange)
 			obj.actor.take_damage(FIREBALL_DAMAGE)
@@ -584,7 +678,7 @@ def closest_monster(max_range):
 	closest_enemy = None
 	closest_dist = max_range + 1
 
-	for object in objects:
+	for object in map.objects:
 		if object.actor and not object == player and libtcod.map_is_in_fov(fov_map, object.x, object.y):
 			dist = player.distance_to(object)
 			if dist < closest_dist:
@@ -644,7 +738,7 @@ class Rect:
 
 	def intersect(self, other):
 		return (self.x1 <= other.x2 and self.x2 >= other.x1 and
-			    self.y1 <= other.y2 and self.y2 >= other.y1)
+				self.y1 <= other.y2 and self.y2 >= other.y1)
 
 	def intersect_point(self, x, y):
 		return (x >= self.x1 and x <= self.x2 and y >= self.y1 and y <= self.y2)
@@ -665,17 +759,167 @@ def make_map():
 	make_dungeon_map()
 	# make_town_map()
 
-def make_town_map():
-	global map, player, objects
+class Building:
+	def __init__(self, worksite=None, rooms=None, floorplan=None):
+		self.worksite = worksite
+		self.rooms = rooms
+		self.floorplan = floorplan
 
-	objects = [player]
+	def random_get_floor(self):
+		while True:
+			x = libtcod.random_get_int(0, self.worksite.x1, self.worksite.x2)
+			y = libtcod.random_get_int(0, self.worksite.y1, self.worksite.y2)
+			if self.floorplan[x-self.worksite.x1][y-self.worksite.y1] == 2:
+				return (x,y)
+
+def make_building(buildings, wall_colors, floor_colors):
+	global map
+	worksite_width_min = 10
+	worksite_width_max = 20
+	worksite_height_min = 10
+	worksite_height_max = 20
+	room_width_min = 3
+	room_width_max = 9
+	room_height_min = 3
+	room_height_max = 9
+	worksite_rect = None
+	while worksite_rect is None:
+		worksite_width = libtcod.random_get_int(0, worksite_width_min, worksite_width_max)
+		worksite_height = libtcod.random_get_int(0, worksite_height_min, worksite_height_max)
+		worksite_x1 = libtcod.random_get_int(0, 1, (map.width-2-worksite_width))
+		worksite_y1 = libtcod.random_get_int(0, 1, (map.height-2-worksite_height))
+		checkRect = Rect(worksite_x1-1, worksite_y1-1, worksite_width+2, worksite_height+2)
+		checkPass = True
+		for otherBuilding in buildings:
+			if otherBuilding.worksite.intersect(checkRect):
+				checkPass = False
+				break;
+		if not checkPass:
+			continue
+
+		worksite = Rect(worksite_x1, worksite_y1, worksite_width, worksite_height)
+
+		rooms = []
+		new_room = make_room_in_area(worksite, room_width_min, room_width_max, room_height_min, room_height_max)
+		rooms.append(new_room)
+
+		min_num_rooms = libtcod.random_get_int(0, 1, 4)
+		num_rooms = 0
+		while num_rooms < min_num_rooms:
+			new_room = None
+			while new_room is None:
+				new_room = make_room_in_area(worksite, room_width_min, room_width_max, room_height_min, room_height_max)
+				checkRect = Rect(new_room.x1+1, new_room.y1+1, new_room.w-2, new_room.h-2)
+				for room in rooms:
+					if not room.intersect(checkRect):
+						new_room = None
+						break
+			#rooms.append(Rect(new_room.x1, new_room.y1, new_room.w, new_room.h))
+			rooms.append(new_room)
+			num_rooms += 1
+
+		floorplan = [[ 0
+			for y in range(worksite_height+1) ]
+				for x in range(worksite_width+1)]
+
+		# build walls for each room
+		for room in rooms:
+			for x in range(room.x1, room.x2+1):
+				for y in range(room.y1, room.y2+1):
+					if x == room.x1 or x == room.x2 or y == room.y1 or y == room.y2:
+						map.grid[x][y].blocked = True
+						map.grid[x][y].block_sight = True
+						map.grid[x][y].background_color = libtcod.color_lerp(wall_colors[0], wall_colors[1], libtcod.random_get_float(0, 0, 1.0))
+						floorplan[x-worksite.x1][y-worksite.y1] = 1
+
+		# build floor for each room
+		for room in rooms:
+			for x in range(room.x1, room.x2+1):
+				for y in range(room.y1, room.y2+1):
+					if x == room.x1 or x == room.x2 or y == room.y1 or y == room.y2:
+						continue
+					map.grid[x][y].blocked = False
+					map.grid[x][y].block_sight = False
+					map.grid[x][y].background_color = libtcod.color_lerp(floor_colors[0], floor_colors[1], libtcod.random_get_float(0, 0, 1.0))
+					floorplan[x-worksite.x1][y-worksite.y1] = 2
+
+		# assign wall characters according to neighbors
+		door_sites = []
+		for y in range(worksite_height+1):
+			for x in range(worksite_width+1):
+				if floorplan[x][y] == 1:
+					char = '+'
+					if y > 0 and y < worksite_height and floorplan[x][y-1] == 1 and floorplan[x][y+1] == 1:
+						char = chr(179)
+						door_sites.append( (x,y) )
+					elif x > 0 and x < worksite_width and floorplan[x-1][y] == 1 and floorplan[x+1][y] == 1:
+						char = chr(196)
+						door_sites.append( (x,y) )
+					elif x < worksite_width and y < worksite_height and floorplan[x+1][y] == 1 and floorplan[x][y+1] == 1:
+						char = chr(218)
+					elif x > 0 and y < worksite_height and floorplan[x-1][y] == 1 and floorplan[x][y+1] == 1:
+						char = chr(191)
+					elif x > 0 and y > 0 and floorplan[x-1][y] == 1 and floorplan[x][y-1] == 1:
+						char = chr(217)
+					elif x < worksite_width and y > 0 and floorplan[x][y-1] == 1 and floorplan[x+1][y] == 1:
+						char = chr(192)
+
+					draw_x = worksite.x1+x
+					draw_y = worksite.y1+y	
+
+					map.grid[draw_x][draw_y].background_character = char
+					map.grid[draw_x][draw_y].background_character_color = libtcod.yellow
+
+		# make doors by choosing randomly from our list of eligible cells
+		random.shuffle(door_sites)
+		max_num_doors = min(libtcod.random_get_int(0, 1, 3), len(door_sites))
+		num_doors = 0
+		doors = []
+		while num_doors < max_num_doors:
+			if len(door_sites) == 0:
+				break
+			(door_x, door_y) = door_sites.pop()
+			door_x += worksite.x1
+			door_y += worksite.y1
+			checkPass = True
+			for (old_x, old_y) in doors:
+				if abs(old_x - door_x) <= 1 and abs(old_y - door_y) <= 1:
+					checkPass = False
+					break
+			if checkPass is False:
+				continue
+			map.grid[door_x][door_y].blocked = False
+			map.grid[door_x][door_y].block_sight = False
+			map.grid[door_x][door_y].background_color = floor_colors[0]
+			door_interactive = InteractiveDoor()
+			door = Object(door_x, door_y, chr(197), 'door', libtcod.Color(98, 62, 9), background_color=libtcod.Color(163, 117, 49), blocks=True, interactive=door_interactive)
+			map.objects.append(door)					
+			doors.append( (door_x, door_y) )
+			num_doors += 1
+
+		break
+
+	return Building(worksite=worksite, rooms=rooms, floorplan=floorplan)
+
+
+def make_room_in_area(area, min_width, max_width, min_height, max_height):
+	width = libtcod.random_get_int(0, min_width, max_width)
+	height = libtcod.random_get_int(0, min_height, max_height)
+	x = libtcod.random_get_int(0, area.x1, area.x2-width)
+	y = libtcod.random_get_int(0, area.y1, area.y2-height)
+	return Rect(x, y, width, height)
+
+def make_town_map():
+	global map, player
+
 	map = Map(width=150, height=100, filled=False, ambient_light=0.6, full_bright=True)
+	map.objects = [player]
 
 	noise2d = libtcod.noise_new(2)
 	noise_octaves = 8.0
 	noise_zoom = 10.0
-	grassBGColorMapIndexes = [0, 24, 64]
-	grassBGColorMapColors = [libtcod.Color(112, 81, 34), libtcod.Color(47, 92, 41), libtcod.Color(75, 148, 66)]
+	grassBGColorMapIndexes = [0, 64]
+	grassBGColorMapColors = [libtcod.Color(47, 92, 41), libtcod.Color(75, 148, 66)]
 	grassBGColorMap = libtcod.color_gen_map(grassBGColorMapColors, grassBGColorMapIndexes)	
 
 	grassFGColorMapIndexes = [0, 12]
@@ -706,70 +950,37 @@ def make_town_map():
 	num_buildings = 0
 	buildings = []
 	while num_buildings < min_buildings:
-		bw = libtcod.random_get_int(0, building_min_width, building_max_width)
-		bh = libtcod.random_get_int(0, building_min_height, building_max_height)
-		bx = libtcod.random_get_int(0, 0, map.width - bw - 1)
-		by = libtcod.random_get_int(0, 0, map.height - bh - 1)
-		rect = Rect(bx, by, bw, bh)
-		checkRect = Rect(rect.x1-1, rect.y1-1, rect.w+2, rect.h+2)
-		checkPass = True
-		for otherRect in buildings:
-			if otherRect.intersect(checkRect):
-				checkPass = False
-				break;
-		if not checkPass:
-			continue;
-
-		for x in range(bx, bx+bw):
-			for y in range(by, by+bh):
-				if x == bx or x == (bx+bw-1) or y == by or y == (by+bh-1):
-					map.grid[x][y].blocked = True
-					map.grid[x][y].block_sight = True
-					map.grid[x][y].background_color = libtcod.color_lerp(building_wall_colors[0], building_wall_colors[1], libtcod.random_get_float(0, 0, 1.0))
-				else:
-					map.grid[x][y].blocked = False
-					map.grid[x][y].block_sight = False
-					map.grid[x][y].background_color = libtcod.color_lerp(building_floor_colors[0], building_floor_colors[1], libtcod.random_get_float(0, 0, 1.0))
-					if ((x+y) % 2) == 0:
-						map.grid[x][y].background_color = map.grid[x][y].background_color * 0.85
-
-		map_add_room_dungeon_entrace(rect)
-
-		num_doors = libtcod.random_get_int(0, 1, 3)
-		for i in range(num_doors):
-			rand_dir = libtcod.random_get_int(0, 0, 3)
-			if rand_dir == 0 or rand_dir == 2:
-				# 0 north, 2 south
-				door_x = libtcod.random_get_int(0, bx+1, (bx+bw-2))
-				if rand_dir == 0:
-					door_y = by
-				else:
-					door_y = by + bh - 1
-			else:
-				# 1 east, 3 west
-				door_y = libtcod.random_get_int(0, by+1, (by+bh-2))
-				if rand_dir == 1:
-					door_x = bx + bw - 1
-				else:
-					door_x = bx
-			map.grid[door_x][door_y].blocked = False
-			map.grid[door_x][door_y].block_sight = False
-			map.grid[door_x][door_y].background_color = building_floor_colors[0]
-			door_interactive = InteractiveDoor()
-			door = Object(door_x, door_y, chr(197), 'door', libtcod.Color(98, 62, 9), background_color=libtcod.Color(163, 117, 49), blocks=True, interactive=door_interactive)
-			objects.append(door)
-
-		npc_x = libtcod.random_get_int(0, rect.x1+1, rect.x2-2)
-		npc_y = libtcod.random_get_int(0, rect.y1+1, rect.y2-2)
-		wander_rect = Rect(rect.x1+1, rect.y1+1, rect.w-2, rect.h-2)
-		npc_ai = BasicAI(wander_rect=wander_rect)
-		npc_obj = Object(npc_x, npc_y, chr(2), 'Yizzt', libtcod.light_green, blocks=True, ai=npc_ai)
-		npc_obj.flash_character('!', libtcod.yellow)
-		objects.append(npc_obj)
-
-		buildings.append(rect)
+		building = make_building(buildings, building_wall_colors, building_floor_colors)
+		buildings.append(building)
 		num_buildings += 1
 
+		# place an npc
+		(npc_x, npc_y) = building.random_get_floor()
+		npc_ai = BasicAI(wander_rect=building.worksite)
+		npc_obj = Object(npc_x, npc_y, chr(2), 'Yizzt', libtcod.light_green, blocks=True, ai=npc_ai)
+		npc_obj.flash_character('!', libtcod.yellow)
+		map.objects.append(npc_obj)
+
+	# place a few dungeon entrances
+	min_num_entrances = libtcod.random_get_int(0, 3, 7)
+	num_entrances = 0
+	entrances = []
+	while num_entrances < min_num_entrances:
+		rand_x = libtcod.random_get_int(0, 1, map.width-7)
+		rand_y = libtcod.random_get_int(0, 1, map.height-7)
+		entrance_rect = Rect(rand_x, rand_y, 5, 5)
+		checkPass = True
+		for building in buildings:
+			if building.worksite.intersect(entrance_rect):
+				checkPass = False
+				break
+		if checkPass is False:
+			continue
+		map_add_dungeon_entrace(rand_x, rand_y)
+		entrances.append(entrance_rect)
+		num_entrances += 1
+
+	# place grass
 	for x in range(map.width):
 		for y in range(map.height):
 			grass_chance = 5
@@ -780,7 +991,7 @@ def make_town_map():
 			if libtcod.random_get_int(0, 0, 100) < grass_chance:
 				passCheck = True
 				for building in buildings:
-					if building.intersect_point(x, y):
+					if building.worksite.intersect_point(x, y):
 						passCheck = False
 						break
 				if passCheck is False:
@@ -805,7 +1016,7 @@ def make_town_map():
 
 					passCheck = True
 					for building in buildings:
-						if building.intersect_point(new_x, new_y):
+						if building.worksite.intersect_point(new_x, new_y):
 							passCheck = False
 							break
 					if passCheck is False:
@@ -815,31 +1026,30 @@ def make_town_map():
 					map.grid[new_x][new_y].background_character_color = grassFGColorMap[rand_color]
 					map.grid[new_x][new_y].background_character = random_choice(grassFGCharacterChances)					
 
+	# place the player
 	player.x = map.width / 2
 	player.y = map.height / 2
 
 	# generate and assign a name for our town
 	map.name = libtcod.namegen_generate("Mingos town")
 
-def map_add_room_dungeon_entrace(room):
+def map_add_dungeon_entrace(pos_x, pos_y):
 	global map
 	rand_dir = random_direction()
-	rand_x = libtcod.random_get_int(0, room.x1+2, room.x2-6)
-	rand_y = libtcod.random_get_int(0, room.y1+2, room.y2-6)
 
 	cell_queue = []
 
 	if rand_dir is DIR_SOUTH:
-		cell_queue = [(rand_x, rand_y), (rand_x+1, rand_y), (rand_x+2, rand_y), (rand_x, rand_y+1), (rand_x+2, rand_y+1), (rand_x, rand_y+2), (rand_x+2, rand_y+2)]
+		cell_queue = [(pos_x, pos_y), (pos_x+1, pos_y), (pos_x+2, pos_y), (pos_x, pos_y+1), (pos_x+2, pos_y+1), (pos_x, pos_y+2), (pos_x+2, pos_y+2)]
 	elif rand_dir is DIR_NORTH:
-		cell_queue = [(rand_x, rand_y), (rand_x+2, rand_y), (rand_x, rand_y+1), (rand_x+2, rand_y+1), (rand_x, rand_y+2), (rand_x+1, rand_y+2), (rand_x+2, rand_y+2)]
+		cell_queue = [(pos_x, pos_y), (pos_x+2, pos_y), (pos_x, pos_y+1), (pos_x+2, pos_y+1), (pos_x, pos_y+2), (pos_x+1, pos_y+2), (pos_x+2, pos_y+2)]
 	elif rand_dir is DIR_WEST:
-		cell_queue = [(rand_x, rand_y), (rand_x, rand_y+2), (rand_x+1, rand_y), (rand_x+1, rand_y+2), (rand_x+2, rand_y), (rand_x+2, rand_y+1), (rand_x+2, rand_y+2)]
+		cell_queue = [(pos_x, pos_y), (pos_x, pos_y+2), (pos_x+1, pos_y), (pos_x+1, pos_y+2), (pos_x+2, pos_y), (pos_x+2, pos_y+1), (pos_x+2, pos_y+2)]
 	elif rand_dir is DIR_EAST:
-		cell_queue = [(rand_x, rand_y), (rand_x, rand_y+1), (rand_x, rand_y+2), (rand_x+1, rand_y), (rand_x+1, rand_y+2), (rand_x+2, rand_y), (rand_x+2, rand_y+2)]
+		cell_queue = [(pos_x, pos_y), (pos_x, pos_y+1), (pos_x, pos_y+2), (pos_x+1, pos_y), (pos_x+1, pos_y+2), (pos_x+2, pos_y), (pos_x+2, pos_y+2)]
 
-	stair_x = rand_x + 1
-	stair_y = rand_y + 1
+	stair_x = pos_x + 1
+	stair_y = pos_y + 1
 	fill_char = chr(176)
 	fill_char = chr(240)
 
@@ -849,14 +1059,12 @@ def map_add_room_dungeon_entrace(room):
 		map.grid[cell_x][cell_y].background_character_color = libtcod.Color(83, 83, 83)
 		map.grid[cell_x][cell_y].blocked = True
 
-	# TODO: place a real stair object
 	stairs_obj = Object(stair_x, stair_y, '>', 'stairs', libtcod.white, always_visible=True)
-	objects.append(stairs_obj)
+	map.objects.append(stairs_obj)
 	map.stairs.append(Stairs(stair_x, stair_y))	
 
-
 def make_dungeon_map():
-	global map, player, objects
+	global map, player
 
 	floorBGColorMapIndexes = [0, 8]
 	floorBGColorMapColors = [libtcod.Color(180, 134, 30), libtcod.Color(200, 180, 50)]
@@ -865,10 +1073,9 @@ def make_dungeon_map():
 	wallBGColorMapIndexes = [0, 8]
 	wallBGColorMapColors = [libtcod.Color(83, 60, 25), libtcod.Color(112, 81, 34)]
 	wallBGColorMap = libtcod.color_gen_map(wallBGColorMapColors, wallBGColorMapIndexes)
-
-	objects = [player]
+	
 	map = Map(width=150, height=100, filled=True, ambient_light=0.08, full_bright=False)
-	# map = [[ Tile(True, bgColorMap=wallBGColorMap)
+	map.objects = [player]
 
 	rooms = []
 	num_rooms = 0
@@ -903,7 +1110,7 @@ def make_dungeon_map():
 			num_rooms += 1
 
 	stairs_obj = Object(new_x, new_y, '>', 'stairs', libtcod.white, always_visible=True)
-	objects.append(stairs_obj)
+	map.objects.append(stairs_obj)
 	map.stairs.append(Stairs(new_x, new_y))
 
 
@@ -955,8 +1162,8 @@ def place_objects(room):
 	item_chances['confuse scroll'] = from_dungeon_level([[10, 2]])
 	item_chances['helmet'] = 80
 
+	# Place monsters
 	num_monsters = libtcod.random_get_int(0, 0, max_monsters)
-
 	for i in range(num_monsters):
 		x = libtcod.random_get_int(0, room.x1 + 1, room.x2 - 1)
 		y = libtcod.random_get_int(0, room.y1 + 1, room.y2 - 1)
@@ -967,10 +1174,11 @@ def place_objects(room):
 			actor_component = Actor(xp=tmpData['xp'], hp=tmpData['hp'], defense=tmpData['defense'], power=tmpData['power'], death_function=tmpData['death_function'])
 			ai_component = BasicMonster()
 			monster = Object(x, y, tmpData['character'], tmpData['name'], tmpData['character_color'], blocks=True, actor=actor_component, ai=ai_component)
-			objects.append(monster)
+			monster.hostile_bg_effect(True)
+			map.objects.append(monster)
 
+	# Place items
 	num_items = libtcod.random_get_int(0, 0, max_items)
-
 	for i in range(num_items):
 		x = libtcod.random_get_int(0, room.x1+1, room.x2-1)
 		y = libtcod.random_get_int(0, room.y1+1, room.y2-1)
@@ -979,7 +1187,7 @@ def place_objects(room):
 			choice = random_choice(item_chances)
 			tmpData = item_data[choice]
 			if 'equip_slot' in tmpData:
-				equippable_component = Equippable(equip_slot=tmpData['equip_slot'], score_bonuses=tmpData['equip_score_bonuses'])
+				equippable_component = Equippable(equip_slot=tmpData['equip_slot'], rating_bonuses=tmpData['equip_rating_bonuses'])
 			else:
 				equippable_component = None
 			if 'use_function' in tmpData:
@@ -989,14 +1197,14 @@ def place_objects(room):
 			item_component = Item(equippable=equippable_component, use_function=use_function)
 			item = Object(x, y, tmpData['character'], tmpData['name'], tmpData['character_color'], item=item_component)
 			item.always_visible = True
-			objects.append(item)
+			map.objects.append(item)
 			item.send_to_back()
 
 def is_blocked(x, y):
 	if map.grid[x][y].blocked:
 		return True
 
-	for object in objects:
+	for object in map.objects:
 		if object.blocks and object.x == x and object.y == y:
 			return True
 
@@ -1069,7 +1277,7 @@ def render_all():
 					libtcod.console_set_default_foreground(con, map.grid[x][y].background_character_color * final_value)
 					libtcod.console_put_char(con, draw_x, draw_y, map.grid[x][y].background_character, libtcod.BKGND_NONE)
 
-	for object in objects:
+	for object in map.objects:
 		if object != player:
 			if camera.is_visible(object.x, object.y):
 				object.draw(camera=camera)
@@ -1080,6 +1288,7 @@ def render_all():
 	libtcod.console_set_default_background(panel, libtcod.black)
 	libtcod.console_clear(panel)
 
+	# TODO: Why is this being rendered every frame?
 	y = 1
 	libtcod.console_set_background_flag(panel, libtcod.BKGND_NONE)
 	libtcod.console_set_alignment(panel, libtcod.LEFT)
@@ -1093,7 +1302,7 @@ def render_all():
 
 	libtcod.console_set_alignment(panel, libtcod.LEFT)
 	libtcod.console_set_background_flag(panel, libtcod.BKGND_NONE)
-	libtcod.console_print(panel, 1, 3, 'Dungeon level ' + str(dungeon_level))
+	libtcod.console_print(panel, 1, 3, map.name)
 
 	libtcod.console_set_default_foreground(panel, libtcod.light_gray)
 	libtcod.console_set_alignment(panel, libtcod.LEFT)
@@ -1119,16 +1328,18 @@ def render_bar(x, y, total_width, name, value, maximum, bar_color, back_color):
 
 
 def message(new_msg, color=libtcod.white):
+	global game_msgs, log_msgs
 	new_msg_lines = textwrap.wrap(new_msg, MSG_WIDTH)
 
 	for line in new_msg_lines:
 		if len(game_msgs) == MSG_HEIGHT:
 			del game_msgs[0]
 		game_msgs.append( (line, color) )
+		log_msgs.append( (line, color) )
 
 def get_names_under_mouse():
 	(x, y) = (mouse.cx, mouse.cy)
-	names = [obj.name for obj in objects
+	names = [obj.name for obj in map.objects
 		if obj.x == x and obj.y == y and libtcod.map_is_in_fov(fov_map, obj.x, obj.y)]
 	names = ', '.join(names)
 	return names.capitalize()
@@ -1144,26 +1355,15 @@ def menu(header, options, width):
 	if header_height > 0:
 		height = height + 1
 	window = libtcod.console_new(width, height)
-	libtcod.console_set_default_background(window, MENU_BACKGROUND_COLOR)
-	libtcod.console_set_default_foreground(window, libtcod.Color(219, 209, 158))
-	libtcod.console_print_frame(window, 0, 0, width, height, clear=True, flag=libtcod.BKGND_SET)
-	libtcod.console_set_default_foreground(window, MENU_TEXT_COLOR)
-	
-	if header is not '':
-		libtcod.console_set_alignment(window, libtcod.CENTER)
-		libtcod.console_set_default_background(window, MENU_HEADER_BACKGROUND_COLOR)
-		libtcod.console_set_default_foreground(window, MENU_HEADER_TEXT_COLOR)
-		libtcod.console_rect(window, 1, 1, width-2, 1, True, libtcod.BKGND_SET)
-		libtcod.console_print_rect(window, width/2, 1, width-2, height, header)
-		libtcod.console_set_alignment(window, libtcod.LEFT)
 
-	y = header_height + 1
+	(x, y) = draw_menu_panel(window, width, height, header_text=header)
+
 	letter_index = ord('a')
 	libtcod.console_set_default_foreground(window, MENU_TEXT_COLOR)
 	libtcod.console_set_background_flag(window, libtcod.BKGND_NONE)
 	for option_text in options:
 		text = '(' + chr(letter_index) + ') ' + option_text
-		libtcod.console_print(window, 1, y, text)
+		libtcod.console_print(window, x, y, text)
 		y += 1
 		letter_index += 1
 
@@ -1209,12 +1409,12 @@ def target_monster(max_range=None):
 		if x is None:
 			return None
 
-		for obj in objects:
+		for obj in map.objects:
 			if obj.x == x and obj.y == y and obj.actor and obj != player:
 				return obj
 
 def abilities_menu(header):
-	if len(player.actor.abilities) == 0:
+	if player.actor.abilities is None or len(player.actor.abilities) == 0:
 		options = ['You have no abilities.']
 	else:
 		options = [ability.name for ability in player.actor.abilities]
@@ -1259,18 +1459,21 @@ def msgbox(text, width=50):
 	menu(text, [], width)
 
 def main_menu():
-	img = libtcod.image_load('menu_background.png')
+	# img = libtcod.image_load('menu_background.png')
 
 	while not libtcod.console_is_window_closed():
-		libtcod.image_blit_2x(img, 0, 0, 0)
+		# libtcod.image_blit_2x(img, 0, 0, 0)
 
 		libtcod.console_set_default_foreground(0, libtcod.light_yellow)
+		libtcod.console_set_background_flag(0, libtcod.BKGND_SET)
+		libtcod.console_set_default_background(0, libtcod.darker_sepia)
+		libtcod.console_clear(0)
 		libtcod.console_set_background_flag(0, libtcod.BKGND_NONE)
 		libtcod.console_set_alignment(0, libtcod.CENTER)
 		libtcod.console_print(0, SCREEN_WIDTH/2, SCREEN_HEIGHT/2-4, 'SEVEN TRIALS')
 		libtcod.console_print(0, SCREEN_WIDTH/2, SCREEN_HEIGHT-2, 'By nefD')
 
-		choice = menu('', ['Play a new game', 'Continue last game', 'Quit'], 24)
+		choice = menu('', ['Play a new game', 'Continue last game', 'Quit'], 30)
 
 		if choice == 0:
 			new_game()
@@ -1300,10 +1503,14 @@ def create_player():
 	noise_dx = 0.0
 	noise_dy = 0.0
 
+	create_state = 'name'
+
 	name_prompt_con = libtcod.console_new(30, 6)
 	name_input = ''
 	name_prompt(name_prompt_con, name_input, width=30)
 
+	skill_prompt_con = libtcod.console_new(80, 40)
+	skillPrompt = SkillPrompt(con=skill_prompt_con)
 
 	while True:
 		libtcod.console_set_default_background(panel, bg_color)
@@ -1322,26 +1529,165 @@ def create_player():
 				libtcod.console_set_char_background(panel, x, y, col, libtcod.BKGND_SET)
 
 		libtcod.console_blit(panel, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 0)	
-		libtcod.console_blit(name_prompt_con, 0, 0, 30, 6, 0, (SCREEN_WIDTH/2)-(30/2), (SCREEN_HEIGHT/2)-(6/2), 1.0, 0.7)
+		if create_state == "name":
+			libtcod.console_blit(name_prompt_con, 0, 0, 30, 6, 0, (SCREEN_WIDTH/2)-(30/2), (SCREEN_HEIGHT/2)-(6/2), 1.0, 0.7)
+		elif create_state == "skill":
+			#skillPrompt.render(skill_prompt_con)
+			libtcod.console_blit(skillPrompt.con, 0, 0, 80, 40, 0, (SCREEN_WIDTH/2)-(80/2), (SCREEN_HEIGHT/2)-(40/2), 1.0, 0.7)
 		libtcod.console_flush()
 		libtcod.sys_check_for_event(libtcod.EVENT_KEY_PRESS|libtcod.EVENT_MOUSE, key, mouse)
 
+		skillPrompt.update()
+
 		if key.vk == libtcod.KEY_ESCAPE:
+			player.name = None
 			break
 		elif key.vk == libtcod.KEY_BACKSPACE:
-			name_input = name_input[:-1]
-			name_prompt(name_prompt_con, name_input, width=30)
+			if create_state == "name":
+				name_input = name_input[:-1]
+				name_prompt(name_prompt_con, name_input, width=30)
 		elif key.vk == libtcod.KEY_CHAR:
-			name_input += chr(key.c)
-			name_prompt(name_prompt_con, name_input, width=30)
+			if create_state == "name":
+				name_input += chr(key.c)
+				name_prompt(name_prompt_con, name_input, width=30)
 		elif key.vk == libtcod.KEY_ENTER:
-			return name_input
+			if create_state == 'name':
+				create_state = 'skill'
+				player.name = name_input
+				#skill_prompt(skill_prompt_con, skill_highlight_index)
+				skillPrompt.render()
+			elif create_state == 'skill':
+				player_add_skill(skillPrompt.get_highlighted())
+				return
 
 def name_prompt(window, name_input, width=30):
 	header = "Enter A Name"
 	name_input += "_"
 	header_height = 3
 	height = 3 + header_height
+
+	(draw_x, draw_y) = draw_menu_panel(window, width, 6, header_text=header)
+
+	# render text box
+	libtcod.console_set_default_background(window, libtcod.black)
+	libtcod.console_rect(window, draw_x, draw_y, width-4, 1, True, libtcod.BKGND_SET)
+	libtcod.console_print_ex(window, draw_x, draw_y, libtcod.BKGND_NONE, libtcod.LEFT, name_input)
+
+class SkillPrompt:
+	def __init__(self, width=80, height=40, header_text="Select A Skill", con=None):
+		self.width = width
+		self.height = height
+		self.header_text = header_text
+		self.highlight_index = 0
+		self.con = con
+		self.skill_obj = skill_data.get(skill_data.keys()[self.highlight_index])
+		self.rank_obj = self.skill_obj['ranks'][1]
+
+	def update(self):
+		global key, mouse
+
+		if key.vk == libtcod.KEY_UP:
+			self.highlight_index -= 1
+			if self.highlight_index < 0:
+				self.highlight_index = len(skill_data) - 1
+			self.skill_obj = skill_data.get(skill_data.keys()[self.highlight_index])
+			self.rank_obj = self.skill_obj['ranks'][1]
+			self.render()
+		elif key.vk == libtcod.KEY_DOWN:
+			self.highlight_index += 1
+			if self.highlight_index >= len(skill_data):
+				self.highlight_index = 0
+			self.skill_obj = skill_data.get(skill_data.keys()[self.highlight_index])
+			self.rank_obj = self.skill_obj['ranks'][1]
+			self.render()
+
+	def get_highlighted(self):
+		list_index = 0
+		for skill_name in skill_data:
+			if self.highlight_index == list_index:
+				return self.skill_obj
+			list_index += 1
+
+	def render(self):
+		(draw_x, draw_y) = draw_menu_panel(self.con, self.width, self.height, self.header_text)
+
+		# render list of skills
+		list_width = 20
+		list_x = draw_x
+		list_y = draw_y
+		list_index = 0
+		libtcod.console_set_alignment(self.con, libtcod.LEFT)
+		libtcod.console_set_default_foreground(self.con, MENU_TEXT_COLOR)
+		for skill_name in skill_data:
+			if self.highlight_index == list_index:
+				libtcod.console_set_default_background(self.con, MENU_SELECTED_BACKGROUND_COLOR)
+				libtcod.console_rect(self.con, list_x, list_y, list_width, 1, True, libtcod.BKGND_SET)
+				libtcod.console_set_default_foreground(self.con, MENU_SELECTED_COLOR)
+				libtcod.console_print(self.con, list_x, list_y, skill_name.capitalize())
+				libtcod.console_set_default_foreground(self.con, MENU_TEXT_COLOR)
+			else:
+				libtcod.console_print(self.con, list_x, list_y, skill_name.capitalize())
+			list_y += 1
+			list_index += 1
+
+		# render next rank of highlighted skill
+		info_x = draw_x + list_width + 2
+		info_w = self.width - 3 - list_width
+		info_y = draw_y
+		libtcod.console_set_default_foreground(self.con, MENU_TEXT_COLOR)
+		libtcod.console_print(self.con, info_x, info_y, "Skill: " + self.skill_obj.get('name', '(Missing skill name!)'))
+		info_y += 2
+		libtcod.console_print(self.con, info_x, info_y, "Next Rank: Level 1 - " + self.rank_obj['name'])
+		info_y += 2
+
+		# output description
+		rank_desc = self.rank_obj.get('description', None)
+		if rank_desc is not None:
+			desc_height = libtcod.console_get_height_rect(self.con, info_x, info_y, info_w, self.height-3-info_y, rank_desc)
+			libtcod.console_print_rect(self.con, info_x, info_y, info_w, self.height-3-info_y, rank_desc)
+			info_y += desc_height + 1
+
+		# output rating bonuses
+		rating_bonuses = self.rank_obj.get('rating_bonuses', None)
+		if rating_bonuses is not None and len(rating_bonuses) > 0:
+			libtcod.console_print(self.con, info_x, info_y, "Rating Bonuses:")
+			info_y += 1
+			for rating in rating_bonuses:
+				bonus_str = ""
+				str_color = MENU_TEXT_COLOR
+				if rating['bonus'] > 0:
+					str_color = POSITIVE_BONUS_TEXT_COLOR
+					bonus_str += "+"
+				elif rating['bonus'] < 0:
+					str_color = NEGATIVE_BONUS_TEXT_COLOR
+					bonus_str += "-"
+				bonus_str += str(rating['bonus']) + " " + rating['rating'].capitalize()
+				libtcod.console_set_default_foreground(self.con, str_color)
+				libtcod.console_print(self.con, info_x + 4, info_y, bonus_str)
+				info_y += 1
+
+		# output new abilities
+		gives_abilities = self.rank_obj.get("gives_abilities", None)
+		if gives_abilities is not None and len(gives_abilities) > 0:
+			info_y += 1
+			libtcod.console_set_default_foreground(self.con, MENU_TEXT_COLOR)
+			if len(gives_abilities) > 1:
+				libtcod.console_print(self.con, info_x, info_y, "New Ability:")
+			else:
+				libtcod.console_print(self.con, info_x, info_y, "New Abilities:")
+			info_y += 1
+			for ability in gives_abilities:
+				libtcod.console_set_default_foreground(self.con, libtcod.yellow)
+				libtcod.console_print(self.con, info_x + 4, info_y, string.capwords(ability['name']))
+				info_y += 1
+
+def skill_prompt(window, highlight_index):
+	header = "Select a Skill"
+	header_height = 3
+	width = 80
+	height = 3 + header_height
+	height = 40 + header_height
+	height = 40
 
 	# render bg and frame
 	libtcod.console_set_default_background(window, MENU_BACKGROUND_COLOR)
@@ -1357,13 +1703,45 @@ def name_prompt(window, name_input, width=30):
 	libtcod.console_print_rect(window, width/2, 1, width-2, height, header)
 	libtcod.console_set_alignment(window, libtcod.LEFT)
 
+	list_width = 20
 	draw_x = 2
 	draw_y = header_height
+	list_x = draw_x
+	list_y = draw_y
+	list_index = 0
 
-	# render text box
-	libtcod.console_set_default_background(window, libtcod.black)
-	libtcod.console_rect(window, draw_x, draw_y, width-4, 1, True, libtcod.BKGND_SET)
-	libtcod.console_print_ex(window, draw_x, draw_y, libtcod.BKGND_NONE, libtcod.LEFT, name_input)
+	# render list of skills
+	libtcod.console_set_alignment(window, libtcod.LEFT)
+	libtcod.console_set_default_foreground(window, MENU_TEXT_COLOR)
+	for skill_name in skill_data:
+		if highlight_index == list_index:
+			libtcod.console_set_default_background(window, MENU_SELECTED_BACKGROUND_COLOR)
+			libtcod.console_rect(window, list_x, list_y, list_width, 1, True, libtcod.BKGND_SET)
+			libtcod.console_set_default_foreground(window, MENU_SELECTED_COLOR)
+			libtcod.console_print(window, list_x, list_y, skill_name.capitalize())
+			libtcod.console_set_default_foreground(window, MENU_TEXT_COLOR)
+		else:
+			libtcod.console_print(window, list_x, list_y, skill_name.capitalize())
+		list_y += 1
+		list_index += 1
+
+def draw_menu_panel(window, width, height, header_text=None):
+	# render background and frame
+	libtcod.console_set_default_background(window, MENU_BACKGROUND_COLOR)
+	libtcod.console_set_default_foreground(window, MENU_FRAME_COLOR)
+	libtcod.console_print_frame(window, 0, 0, width, height, clear=True, flag=libtcod.BKGND_SET)
+	libtcod.console_set_default_foreground(window, MENU_TEXT_COLOR)
+	if header_text is None or header_text == "":
+		return (2, 1)
+
+	# reder header text
+	libtcod.console_set_alignment(window, libtcod.CENTER)
+	libtcod.console_set_default_background(window, MENU_HEADER_BACKGROUND_COLOR)
+	libtcod.console_set_default_foreground(window, MENU_HEADER_TEXT_COLOR)
+	libtcod.console_rect(window, 1, 1, width-2, 1, True, libtcod.BKGND_SET)
+	libtcod.console_print_rect(window, width/2, 1, width-2, height, header_text)
+	libtcod.console_set_alignment(window, libtcod.LEFT)
+	return (2, 3)
 
 def message_log():
 	global key, mouse
@@ -1390,8 +1768,17 @@ def message_log():
 
 	x = 2
 	y = 3
+	max_lines = (height - 3) - y
 
 	# TODO: Display actual message log contents
+	start_msg = 0
+	end_msg = start_msg + max_lines
+	if end_msg > len(log_msgs):
+		end_msg = len(log_msgs)
+	for (line, color) in log_msgs[start_msg:end_msg]:
+		libtcod.console_set_default_foreground(window, color)
+		libtcod.console_print(window, x, y, line)
+		y += 1
 
 	while True:
 		render_all()
@@ -1403,34 +1790,39 @@ def message_log():
 			return
 
 def new_game():
-	global player, inventory, game_msgs, game_state, dungeon_level, pathfinder, camera, con
-
-	player_name = create_player()
-	if player_name is None:
-		game_state = 'cancelled'
-		return
+	global player, world, inventory, game_msgs, log_msgs, game_state, dungeon_level, pathfinder, camera, con
 
 	player_equip_slots = ["head", "torso"]
 	player_equipment_component = Equipment(equip_slots=player_equip_slots)
-	tmpData = ability_data['lightning strike']
-	use_function = None
-	if 'use_function' in tmpData:
-		use_function = tmpData['use_function']
-	lightning_ability = Ability(tmpData['name'], use_function=use_function)
-	player_abilities = [lightning_ability]
-	player_actor_component = Actor(xp=0, hp=100, defense=1, power=4, death_function=player_death, equipment=player_equipment_component, abilities=player_abilities)
-	player = Object(0, 0, '@', player_name, libtcod.white, blocks=True, actor=player_actor_component)
+	#tmpData = ability_data['lightning strike']
+	#use_function = None
+	#if 'use_function' in tmpData:
+	#	use_function = tmpData['use_function']
+	#lightning_ability = Ability(tmpData['name'], use_function=use_function)
+	#player_abilities = []
+	player_actor_component = Actor(xp=0, hp=100, defense=1, power=4, death_function=player_death, equipment=player_equipment_component)
+	player = Object(0, 0, '@', 'Unknown', libtcod.white, blocks=True, actor=player_actor_component)
 	player.level = 1
+	player.skills = {}
+	create_player()
+	if player.name is None:
+		game_state = 'cancelled'
+		return
 
+
+	world = World()
 	dungeon_level = 1
+	log_msgs = []
 	game_msgs = []
 	inventory = []
 	game_state = 'playing'
 
 	camera = Camera(0, 0, width=SCREEN_WIDTH, height=43)
-	camera.update_position(player.x, player.y)
 	con = libtcod.console_new(camera.width, camera.height)	
 	make_town_map()
+	world.add_map(map)
+	camera.update_position(player.x, player.y)
+
 	initialize_fov()
 	if pathfinder is not None:
 		libtcod.path_delete(pathfinder)
@@ -1459,7 +1851,7 @@ def play_game():
 
 		check_level_up()
 
-		for object in objects:
+		for object in map.objects:
 			object.clear()
 
 		player_action = handle_keys()
@@ -1467,7 +1859,7 @@ def play_game():
 			break
 
 		if game_state == 'playing' and player_action != 'didnt-take-turn':
-			for object in objects:
+			for object in map.objects:
 				if object.ai:
 					object.ai.take_turn()
 
@@ -1476,32 +1868,37 @@ def play_game():
 
 def save_game():
 	file = shelve.open('savegame', 'n')
-	file['map'] = map
+	file['world'] = world
+	file['map_index'] = world.maps.index(map)
 	file['camera'] = camera
-	file['objects'] = objects
-	file['player_index'] = objects.index(player)
+	file['player_index'] = map.objects.index(player)
 	file['dungeon_level'] = dungeon_level
 	file['inventory'] = inventory
 	file['game_msgs'] = game_msgs
+	file['log_msgs'] = log_msgs
 	file['game_state'] = game_state
 	file.close()
 
 def load_game():
-	global map, camera, objects, player, inventory, game_msgs, game_state, dungeon_level, con
+	global map, world, camera, player, inventory, game_msgs, log_msgs, game_state, dungeon_level, con, pathfinder, fov_map
 
 	file = shelve.open('savegame', 'r')
-	map = file['map']
+	world = file['world']
+	map = world.maps[file['map_index']]
 	camera = file['camera']
-	objects = file['objects']
-	player = objects[file['player_index']]
+	player = map.objects[file['player_index']]
 	dungeon_level = file['dungeon_level']
 	inventory = file['inventory']
 	game_msgs = file['game_msgs']
+	log_msgs = file['log_msgs']
 	game_state = file['game_state']
 	file.close()
 
 	con = libtcod.console_new(camera.width, camera.height)
 	initialize_fov()
+	if pathfinder is not None:
+		libtcod.path_delete(pathfinder)
+	pathfinder = libtcod.path_new_using_map(fov_map)
 
 def load_data():
 	parser = libtcod.parser_new()
@@ -1525,7 +1922,7 @@ def load_data():
 	libtcod.struct_add_property(itemStruct, 'character_color', libtcod.TYPE_COLOR, True)
 	libtcod.struct_add_property(itemStruct, 'use_function', libtcod.TYPE_STRING, False)
 	libtcod.struct_add_property(itemStruct, 'equip_slot', libtcod.TYPE_STRING, False)
-	libtcod.struct_add_list_property(itemStruct, 'equip_score_bonuses', libtcod.TYPE_STRING, False)
+	libtcod.struct_add_list_property(itemStruct, 'equip_rating_bonuses', libtcod.TYPE_STRING, False)
 	libtcod.parser_run(parser, os.path.join('data', 'item_data.cfg'), ItemDataListener())
 
 	# load abilities data
@@ -1534,6 +1931,25 @@ def load_data():
 	libtcod.struct_add_property(abilityStruct, 'use_function', libtcod.TYPE_STRING, False)
 	libtcod.parser_run(parser, os.path.join('data', 'ability_data.cfg'), AbilityDataListener())
 
+	# load skills data
+	ratingBonusStruct = libtcod.parser_new_struct(parser, 'ratingBonus')
+	libtcod.struct_add_property(ratingBonusStruct, 'bonus', libtcod.TYPE_INT, True)
+
+	giveAbilityStruct = libtcod.parser_new_struct(parser, 'giveAbility')
+
+	skillRankStruct = libtcod.parser_new_struct(parser, 'skillRank')
+	libtcod.struct_add_property(skillRankStruct, 'rankLevel', libtcod.TYPE_INT, True)
+	libtcod.struct_add_property(skillRankStruct, 'description', libtcod.TYPE_STRING, False)
+	libtcod.struct_add_structure(skillRankStruct, ratingBonusStruct)
+	libtcod.struct_add_structure(skillRankStruct, giveAbilityStruct)
+
+	skillStruct = libtcod.parser_new_struct(parser, 'skill')
+	libtcod.struct_add_property(skillStruct, 'description', libtcod.TYPE_STRING, False)
+	libtcod.struct_add_structure(skillStruct, skillRankStruct)
+	libtcod.parser_run(parser, os.path.join('data', 'skill_data.cfg'), SkillDataListener())
+
+	libtcod.parser_delete(parser)
+
 	# load name generation data
 	for file in os.listdir('data/namegen'):
 		if file.find('.cfg') > 0:
@@ -1541,49 +1957,49 @@ def load_data():
 	namegen_sets = libtcod.namegen_get_sets()
 
 class MonsterDataListener:
-    def new_struct(self, struct, name):
-    	global monster_data
-        self.current_name = name
-        monster_data[name] = {}
-        return True
+	def new_struct(self, struct, name):
+		global monster_data
+		self.current_name = name
+		monster_data[name] = {}
+		return True
 
-    def new_flag(self, name):
-    	global monster_data
-        monster_data[self.current_name][name] = True
-        return True
+	def new_flag(self, name):
+		global monster_data
+		monster_data[self.current_name][name] = True
+		return True
 
-    def new_property(self,name, typ, value):
-    	global monster_data
-        monster_data[self.current_name][name] = value
-        return True
+	def new_property(self,name, typ, value):
+		global monster_data
+		monster_data[self.current_name][name] = value
+		return True
 
-    def end_struct(self, struct, name):
-    	self.current_name = None
-        return True
+	def end_struct(self, struct, name):
+		self.current_name = None
+		return True
 
-    def error(self,msg):
-    	global monster_data
-        print 'Monster data parser error : ', msg
-        if self.current_name is not None:
-        	del monster_data[self.current_name]
-        	self.current_name = None
-        return True
+	def error(self,msg):
+		global monster_data
+		print 'Monster data parser error : ', msg
+		if self.current_name is not None:
+			del monster_data[self.current_name]
+			self.current_name = None
+		return True
 
 class ItemDataListener:
-    def new_struct(self, struct, name):
-    	global item_data
-        self.current_name = name
-        item_data[name] = {}
-        return True
-
-    def new_flag(self, name):
-    	global item_data
-        item_data[self.current_name][name] = True
-        return True
-
-    def new_property(self,name, typ, value):
+	def new_struct(self, struct, name):
 		global item_data
-		if name == "equip_score_bonuses":
+		self.current_name = name
+		item_data[name] = {}
+		return True
+
+	def new_flag(self, name):
+		global item_data
+		item_data[self.current_name][name] = True
+		return True
+
+	def new_property(self,name, typ, value):
+		global item_data
+		if name == "equip_rating_bonuses":
 			item_data[self.current_name][name] = {}
 			for i in value:
 				parts = i.split(":")
@@ -1592,46 +2008,110 @@ class ItemDataListener:
 			item_data[self.current_name][name] = value
 		return True
 
-    def end_struct(self, struct, name):
-    	self.current_name = None
-        return True
+	def end_struct(self, struct, name):
+		self.current_name = None
+		return True
 
-    def error(self,msg):
-    	global item_data
-        print 'Item data parser error : ', msg
-        if self.current_name is not None:
-        	del item_data[self.current_name]
-        	self.current_name = None
-        return True
+	def error(self,msg):
+		global item_data
+		print 'Item data parser error : ', msg
+		if self.current_name is not None:
+			del item_data[self.current_name]
+			self.current_name = None
+		return True
 
 class AbilityDataListener:
-    def new_struct(self, struct, name):
-    	global ability_data
-        self.current_name = name
-        ability_data[name] = {}
-        return True
+	def new_struct(self, struct, name):
+		global ability_data
+		self.current_name = name
+		ability_data[name] = {}
+		return True
 
-    def new_flag(self, name):
-    	global ability_data
-        ability_data[self.current_name][name] = True
-        return True
+	def new_flag(self, name):
+		global ability_data
+		ability_data[self.current_name][name] = True
+		return True
 
-    def new_property(self,name, typ, value):
+	def new_property(self,name, typ, value):
 		global ability_data
 		ability_data[self.current_name][name] = value
 		return True
 
-    def end_struct(self, struct, name):
-    	self.current_name = None
-        return True
+	def end_struct(self, struct, name):
+		self.current_name = None
+		return True
 
-    def error(self,msg):
-    	global ability_data
-        print 'Ability data parser error : ', msg
-        if self.current_name is not None:
-        	del ability_data[self.current_name]
-        	self.current_name = None
-        return True
+	def error(self,msg):
+		global ability_data
+		print 'Ability data parser error : ', msg
+		if self.current_name is not None:
+			del ability_data[self.current_name]
+			self.current_name = None
+		return True
+
+class SkillDataListener:
+	def __init__(self):
+		self.skill_obj = None
+		self.rank_obj = None
+		self.ratingBonus_obj = None
+		self.ability_obj = None
+
+	def new_struct(self, struct, name):
+		struct_name = libtcod.struct_get_name(struct)
+		if struct_name == "skill":
+			self.skill_obj = { 
+				'name': name,
+				'ranks': {}
+			}
+		elif struct_name == "skillRank":
+			self.rank_obj = {
+				'name': name,
+				'rating_bonuses': [],
+				'gives_abilities': []
+			}
+		elif struct_name == "ratingBonus":
+			self.ratingBonus_obj = {
+				'rating': name
+			}
+		elif struct_name == "giveAbility":
+			self.ability_obj = {
+				'name': name
+			}
+		return True
+
+	def new_flag(self, name):
+		#ability_data[self.current_name][name] = True
+		return True
+
+	def new_property(self, name, typ, value):
+		if self.ratingBonus_obj is not None:
+			self.ratingBonus_obj[name] = value
+		elif self.ability_obj is not None:
+			self.ability_obj[name] = value
+		elif self.rank_obj is not None:
+			self.rank_obj[name] = value
+		else:
+			self.skill_obj[name] = value
+		return True
+
+	def end_struct(self, struct, name):
+		struct_name = libtcod.struct_get_name(struct)
+		if struct_name == "ratingBonus":
+			self.rank_obj['rating_bonuses'].append(self.ratingBonus_obj)
+			self.ratingBonus_obj = None
+		elif struct_name == "giveAbility":
+			self.rank_obj['gives_abilities'].append(self.ability_obj)
+			self.ability_obj = None
+		elif struct_name == "skillRank":
+			self.skill_obj['ranks'][self.rank_obj['rankLevel']] = self.rank_obj
+			self.rank_obj = None
+		elif struct_name == "skill":
+			skill_data[self.skill_obj['name']] = self.skill_obj;
+		return True
+
+	def error(self,msg):
+		print "skill data struct error: " + msg
+		return True
 
 class Camera:
 	def __init__(self, x=0, y=0, width=None, height=None, track_threshold=10):
@@ -1649,16 +2129,17 @@ class Camera:
 		center_x = target_x - (self.width / 2)
 		center_y = target_y - (self.height / 2)
 
-		if abs(self.x - center_x) <= self.track_threshold and abs(self.y - center_y) <= self.track_threshold:
-			return
+		if abs(self.x - center_x) > self.track_threshold:
+			self.x = center_x
 
-		self.x = center_x
-		self.y = center_y
+		if abs(self.y - center_y) > self.track_threshold:
+			self.y = center_y
 
 		if self.x < 0:
 			self.x = 0
 		elif (self.x + self.width) > map.width:
 			self.x = map.width - self.width
+
 		if self.y < 0:
 			self.y = 0
 		elif (self.y + self.height) > map.height:
@@ -1683,7 +2164,7 @@ con = libtcod.console_new(5, 5)
 ability_data = {}
 item_data = {}
 monster_data = {}
+skill_data = {}
 namegen_sets = None
 load_data()
-
 main_menu()
