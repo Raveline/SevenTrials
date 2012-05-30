@@ -1,3 +1,4 @@
+import cProfile
 import libtcodpy as libtcod
 import math
 import os
@@ -10,7 +11,8 @@ import uuid
 
 SCREEN_WIDTH = 120
 SCREEN_HEIGHT = 50
-LIMIT_FPS = 20
+LIMIT_FPS = 60
+DISPLAY_FPS = True
 
 BAR_WIDTH = 20
 PANEL_HEIGHT = 8
@@ -67,7 +69,7 @@ DIR_EAST = 1
 DIR_SOUTH = 2
 DIR_WEST = 3
 
-def handle_keys():
+def handle_input():
 	global fov_recompute, key, mouse
  
 	# key = libtcod.console_check_for_keypress(libtcod.KEY_PRESSED)
@@ -76,6 +78,11 @@ def handle_keys():
 		return 'exit'
 
 	if game_state == 'playing':
+		if mouse.lbutton_pressed:
+			if mouse_move_highlight_path is not None:
+				player.move_target = (last_mouseX, last_mouseY)
+				player.move_path = mouse_move_highlight_path
+				player_move_along_path()
 		if key.vk == libtcod.KEY_UP:
 			player_move_or_attack(0, -1)
 		elif key.vk == libtcod.KEY_DOWN:
@@ -85,6 +92,7 @@ def handle_keys():
 		elif key.vk == libtcod.KEY_RIGHT:
 			player_move_or_attack(1, 0)
 		elif key.vk == libtcod.KEY_ENTER and key.lalt:
+			map.markDirty(True)
 			libtcod.console_set_fullscreen(not libtcod.console_is_fullscreen())
 		else:
 			key_char = chr(key.c)
@@ -139,8 +147,36 @@ def handle_keys():
 
 			return 'didnt-take-turn'
 
+def player_clear_move_path():
+	player.move_path = None
+	player.move_target = None
+
+def player_move_along_path():
+	global player
+
+	# TODO: Depending on the obstacle, you could recalculate a new route below
+
+	if len(player.move_path) == 0:
+		player_clear_move_path()
+		return
+
+	(x, y) = player.move_path.pop(0)
+
+	if not libtcod.map_is_walkable(map.fov, x, y):
+		player_clear_move_path()
+		return
+
+	for object in map.objects:
+		if object.x == x and object.y == y and object.blocks is True:
+			player_clear_move_path()
+			return
+
+	player.move(x - player.x, y - player.y)
+	map.markDirty(True)
+
 def player_move_or_attack(dx, dy):
-	global fov_recompute
+	global fov_recompute, map
+	map.markDirty(True)
 
 	x = player.x + dx
 	y = player.y + dy
@@ -221,9 +257,15 @@ class Map:
 		self.name = name
 		self.stairs = []
 		self.objects = []
+		self.fov = None
+		self.pathfinder = None
+		self.dirty = True
 		self.grid = [[ Tile(filled)
 			for y in range(height) ]
 				for x in range(width) ]
+
+	def markDirty(self, toggle=True):
+		self.dirty = toggle
 
 class Stairs:
 	def __init__(self, x, y, obj_index=None, target_map_index=None):
@@ -237,9 +279,9 @@ class Stairs:
 		global world, map, player
 		if self.target_map_index is None:
 			current_map_index = world.maps.index(map)
-			my_stair_index = map.stairs.index(self)
+			my_stair_index = map.stairs.index(self)			
 			make_dungeon_map()
-			world.add_map(map)
+			world.add_map(map)			
 			self.target_map_index = len(world.maps) - 1
 			stair_obj = map.stairs[self.target_stair_index]
 			stair_obj.target_map_index = current_map_index
@@ -249,7 +291,11 @@ class Stairs:
 		stair_obj = map.stairs[self.target_stair_index]
 		player.x = stair_obj.x
 		player.y = stair_obj.y
-		initialize_fov()		
+
+		initialize_fov()	
+		if map.pathfinder is not None:
+			libtcod.path_delete(map.pathfinder)
+		map.pathfinder = libtcod.path_new_using_map(map.fov)			
 
 class Object:
 	def __init__(self, x, y, char, name, color, background_color=None, blocks=False, always_visible=False, actor=None, ai=None, item=None, interactive=None):
@@ -276,6 +322,8 @@ class Object:
 
 		self.do_flash = False
 		self.do_hostile_bg = False
+		self.move_path = None
+		self.move_target = None
 
 	def flash_character(self, char=None, color=None):
 		if char is None:
@@ -307,10 +355,10 @@ class Object:
 			self.y = target_y
 
 	def move_towards(self, target_x, target_y):
-
-		libtcod.path_compute(pathfinder, self.x, self.y, target_x, target_y)
-		if not libtcod.path_is_empty(pathfinder):
-			path_x, path_y = libtcod.path_get(pathfinder, 0)
+		global map
+		libtcod.path_compute(map.pathfinder, self.x, self.y, target_x, target_y)
+		if not libtcod.path_is_empty(map.pathfinder):
+			path_x, path_y = libtcod.path_get(map.pathfinder, 0)
 			dx = path_x - self.x
 			dy = path_y - self.y
 		else:
@@ -329,13 +377,10 @@ class Object:
 		dy = other.y - self.y
 		return math.sqrt(dx ** 2 + dy ** 2)
 
-	def draw(self, camera=None):
-		draw_x = self.x
-		draw_y = self.y
-		if camera is not None:
-			draw_x -= camera.x
-			draw_y -= camera.y
-		if map.full_bright or (libtcod.map_is_in_fov(fov_map, self.x, self.y) or
+	def draw(self, con):
+		draw_x = self.x - camera.x
+		draw_y = self.y - camera.y
+		if map.full_bright or (libtcod.map_is_in_fov(map.fov, self.x, self.y) or
 			(self.always_visible and map.grid[self.x][self.y].explored)):
 			libtcod.console_set_default_foreground(con, self.color)
 			if self.background_color:
@@ -362,6 +407,7 @@ class Object:
 				self.flash_counter -= (math.pi * 2)
 
 	def clear(self):
+		con = camera.object_con
 		libtcod.console_put_char(con, self.x, self.y, ' ', libtcod.BKGND_NONE)
 
 	def send_to_back(self):
@@ -509,6 +555,7 @@ class Equipment:
 class BasicAI:
 	def __init__(self, wander_rect=None):
 		self.wander_rect = wander_rect
+		self.hostile = False
 
 	def take_turn(self):
 		# wander randomly
@@ -526,16 +573,19 @@ class BasicAI:
 
 		self.owner.move(dx, dy)
 
-class BasicMonster:
+class BasicMonster(BasicAI):
+	def __init__(self):
+		self.hostile = True
+
 	def take_turn(self):
 		monster = self.owner
-		if libtcod.map_is_in_fov(fov_map, monster.x, monster.y):
+		if libtcod.map_is_in_fov(map.fov, monster.x, monster.y):
 			if monster.distance_to(player) >= 2:
 				monster.move_towards(player.x, player.y)
 			elif player.actor.hp > 0:
 				monster.actor.attack(player)
 
-class ConfusedMonster:
+class ConfusedMonster(BasicAI):
 	def __init__(self, old_ai, num_turns=CONFUSE_NUM_TURNS):
 		self.old_ai = old_ai
 		self.num_turns = num_turns
@@ -679,7 +729,7 @@ def closest_monster(max_range):
 	closest_dist = max_range + 1
 
 	for object in map.objects:
-		if object.actor and not object == player and libtcod.map_is_in_fov(fov_map, object.x, object.y):
+		if object.actor and not object == player and libtcod.map_is_in_fov(map.fov, object.x, object.y):
 			dist = player.distance_to(object)
 			if dist < closest_dist:
 				closest_enemy = object
@@ -1167,14 +1217,13 @@ def place_objects(room):
 	for i in range(num_monsters):
 		x = libtcod.random_get_int(0, room.x1 + 1, room.x2 - 1)
 		y = libtcod.random_get_int(0, room.y1 + 1, room.y2 - 1)
-
+		
 		if not is_blocked(x, y):
 			choice = random_choice(monster_chances)
 			tmpData = monster_data[choice]
 			actor_component = Actor(xp=tmpData['xp'], hp=tmpData['hp'], defense=tmpData['defense'], power=tmpData['power'], death_function=tmpData['death_function'])
 			ai_component = BasicMonster()
 			monster = Object(x, y, tmpData['character'], tmpData['name'], tmpData['character_color'], blocks=True, actor=actor_component, ai=ai_component)
-			monster.hostile_bg_effect(True)
 			map.objects.append(monster)
 
 	# Place items
@@ -1217,78 +1266,93 @@ def from_dungeon_level(table):
 	return 0
 
 def render_all():
-	global fov_map, fov_recompute, camera
+	global map, fov_recompute, camera, mouse_move_highlight_path
 	global color_dark_wall, color_dark_ground, color_light_wall, color_light_ground
 	if fov_recompute:
 		fov_recompute = False
-		libtcod.map_compute_fov(fov_map, player.x, player.y, int(TORCH_RADIUS), FOV_LIGHT_WALLS, libtcod.FOV_PERMISSIVE_8)
+		map.markDirty(True)
+		libtcod.map_compute_fov(map.fov, player.x, player.y, int(TORCH_RADIUS), FOV_LIGHT_WALLS, libtcod.FOV_PERMISSIVE_8)
 
 	camera.update_position(player.x, player.y)
-	libtcod.console_set_default_background(con, libtcod.black)
-	libtcod.console_clear(con)
+	if map.dirty is True:
+		map.dirty = False
+		con = camera.map_con
+		libtcod.console_set_default_background(con, libtcod.black)
+		libtcod.console_clear(con)
 
-	for y in range(camera.y, (camera.y + camera.height)):
-		if y < 0 or y >= map.height:
-			continue
-		draw_y = y - camera.y
-		for x in range(camera.x, (camera.x + camera.width)):
-			if x < 0 or x >= map.width:
+		for y in range(camera.y, (camera.y + camera.height)):
+			if y < 0 or y >= map.height:
 				continue
-			draw_x = x - camera.x
-			visible = libtcod.map_is_in_fov(fov_map, x, y)
-			wall = map.grid[x][y].block_sight
-			if not visible and not map.full_bright:
-				if map.grid[x][y].explored:
-					if wall:
-						libtcod.console_set_char_background(con, draw_x, draw_y, color_dark_wall, libtcod.BKGND_SET)
-					else:
-						libtcod.console_set_char_background(con, draw_x, draw_y, color_dark_ground, libtcod.BKGND_SET)
-			else:
-				if wall:
-					use_color = color_light_wall
+			draw_y = y - camera.y
+			for x in range(camera.x, (camera.x + camera.width)):
+				if x < 0 or x >= map.width:
+					continue
+				draw_x = x - camera.x
+				visible = libtcod.map_is_in_fov(map.fov, x, y)
+				wall = map.grid[x][y].block_sight
+				if not visible and not map.full_bright:
+					if map.grid[x][y].explored:
+						if wall:
+							libtcod.console_set_char_background(con, draw_x, draw_y, color_dark_wall, libtcod.BKGND_SET)
+						else:
+							libtcod.console_set_char_background(con, draw_x, draw_y, color_dark_ground, libtcod.BKGND_SET)
 				else:
-					use_color = color_light_ground
-				if map.grid[x][y].background_color:
-					use_color = map.grid[x][y].background_color
+					if wall:
+						use_color = color_light_wall
+					else:
+						use_color = color_light_ground
+					if map.grid[x][y].background_color:
+						use_color = map.grid[x][y].background_color
 
-				final_value = map.ambient_light
-				radius = TORCH_RADIUS * 1.0
-				squared_radius = radius * radius;
+					final_value = map.ambient_light
+					radius = TORCH_RADIUS * 1.0
+					squared_radius = radius * radius;
 
-				if abs(player.x - x) <= radius and abs(player.y - y) <= radius:
-					squared_distance = float(x - player.x) * (x - player.x) + (y - player.y) * (y - player.y)
-					if squared_distance <= squared_radius:
-						#light_color = TORCH_COLOR# * 0.4
-						coef1 = 1.0 / (1.0 + (squared_distance/20))
-						coef2 = coef1 - 1.0 / (1.0+squared_radius)
-						coef3 = coef2 / (1.0 - (1.0/(1.0+squared_radius)))
-						final_value = coef3
-						if final_value < map.ambient_light:
-							final_value = map.ambient_light
-						elif final_value > 1.0:
-							final_value = 1.0
+					if abs(player.x - x) <= radius and abs(player.y - y) <= radius:
+						squared_distance = float(x - player.x) * (x - player.x) + (y - player.y) * (y - player.y)
+						if squared_distance <= squared_radius:
+							#light_color = TORCH_COLOR# * 0.4
+							coef1 = 1.0 / (1.0 + (squared_distance/20))
+							coef2 = coef1 - 1.0 / (1.0+squared_radius)
+							coef3 = coef2 / (1.0 - (1.0/(1.0+squared_radius)))
+							final_value = coef3
+							if final_value < map.ambient_light:
+								final_value = map.ambient_light
+							elif final_value > 1.0:
+								final_value = 1.0
 
-				final_color = use_color * final_value
+					final_color = use_color * final_value
 
-				libtcod.console_set_char_background(con, draw_x, draw_y, final_color, libtcod.BKGND_SET)
-				map.grid[x][y].explored = True
+					libtcod.console_set_char_background(con, draw_x, draw_y, final_color, libtcod.BKGND_SET)
+					map.grid[x][y].explored = True
 
-				if map.grid[x][y].background_character is not None:
-					libtcod.console_set_default_foreground(con, map.grid[x][y].background_character_color * final_value)
-					libtcod.console_put_char(con, draw_x, draw_y, map.grid[x][y].background_character, libtcod.BKGND_NONE)
+					if map.grid[x][y].background_character is not None:
+						libtcod.console_set_default_foreground(con, map.grid[x][y].background_character_color * final_value)
+						libtcod.console_put_char(con, draw_x, draw_y, map.grid[x][y].background_character, libtcod.BKGND_NONE)
 
-	for object in map.objects:
-		if object != player:
-			if camera.is_visible(object.x, object.y):
-				object.draw(camera=camera)
-	player.draw(camera=camera)
+		for object in map.objects:
+			if object != player:
+				if camera.is_visible(object.x, object.y):
+					object.draw(con=camera.map_con)
+		player.draw(con=camera.map_con)
 
-	libtcod.console_blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 0)
+	libtcod.console_blit(camera.map_con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 0)
+	# libtcod.console_blit(camera.object_con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 0)
+	# How can I blit object_con on to map_con without blanking out the screen? Some objects may still want to set their background color..
 
+	if mouse_move_highlight_path is not None and len(mouse_move_highlight_path) > 0:
+		for (x, y) in mouse_move_highlight_path:
+			draw_x = x - camera.x
+			draw_y = y - camera.y
+			current_color = libtcod.console_get_char_background(0, draw_x, draw_y)
+			highlight_color = libtcod.color_lerp(current_color, libtcod.yellow, 0.5)
+			libtcod.console_set_char_background(0, draw_x, draw_y, highlight_color, libtcod.BKGND_SET)
+
+
+	# TODO: Why is this being rendered every frame?
 	libtcod.console_set_default_background(panel, libtcod.black)
 	libtcod.console_clear(panel)
 
-	# TODO: Why is this being rendered every frame?
 	y = 1
 	libtcod.console_set_background_flag(panel, libtcod.BKGND_NONE)
 	libtcod.console_set_alignment(panel, libtcod.LEFT)
@@ -1309,6 +1373,13 @@ def render_all():
 	libtcod.console_print(panel, 1, 0, get_names_under_mouse())
 
 	libtcod.console_blit(panel, 0, 0, SCREEN_WIDTH, PANEL_HEIGHT, 0, 0, PANEL_Y)
+
+	if DISPLAY_FPS is True:
+		libtcod.console_set_default_foreground(0, libtcod.white)
+		libtcod.console_set_default_background(0, libtcod.black)
+		libtcod.console_print_ex(0, SCREEN_WIDTH-1, 0, libtcod.BKGND_SET, libtcod.RIGHT, "FPS: "+str(libtcod.sys_get_fps()))
+		libtcod.console_print_ex(0, SCREEN_WIDTH-1, 1, libtcod.BKGND_SET, libtcod.RIGHT, "Last Frame MS: "+str(libtcod.sys_get_last_frame_length()))
+
 
 def render_bar(x, y, total_width, name, value, maximum, bar_color, back_color):
 	bar_width = int(float(value) / maximum * total_width)
@@ -1339,16 +1410,42 @@ def message(new_msg, color=libtcod.white):
 
 def get_names_under_mouse():
 	(x, y) = (mouse.cx, mouse.cy)
-	names = [obj.name for obj in map.objects
-		if obj.x == x and obj.y == y and libtcod.map_is_in_fov(fov_map, obj.x, obj.y)]
+	x += camera.x
+	y += camera.y
+	names = []
+	for obj in map.objects:
+		if obj.x == x and obj.y == y and (map.full_bright is True):# or libtcod.map_is_in_fov(map.fov, obj.x, obj.y)):
+			names.append(obj.name)
+
 	names = ', '.join(names)
 	return names.capitalize()
+
+def get_player_path_to_mouse():
+	global player, last_mouseX, last_mouseY
+	global mouse_move_highlight_path, mouse_path_update_delay, mouse_path_update_counter
+	(mx, my) = (mouse.cx, mouse.cy)
+	mx += camera.x
+	my += camera.y
+	if last_mouseX == mx and last_mouseY == my:
+			return
+
+	last_mouseX = mx
+	last_mouseY = my
+
+	libtcod.path_compute(map.pathfinder, player.x, player.y, mx, my)
+	if not libtcod.path_is_empty(map.pathfinder):
+		mouse_move_highlight_path = []
+		for i in range(libtcod.path_size(map.pathfinder)):
+			path_x, path_y = libtcod.path_get(map.pathfinder, i)
+			mouse_move_highlight_path.append((path_x, path_y))
+	else:
+		mouse_move_highlight_path = None
 
 def menu(header, options, width):
 	if len(options) > 26: raise ValueError('Cannot have a menu with more than 26 options.')
 	libtcod.console_set_alignment(0, libtcod.LEFT)
-	libtcod.console_set_alignment(con, libtcod.LEFT)
-	header_height = libtcod.console_get_height_rect(con, 0, 0, width-2, SCREEN_HEIGHT, header)
+	#libtcod.console_set_alignment(con, libtcod.LEFT)
+	header_height = libtcod.console_get_height_rect(0, 0, 0, width-2, SCREEN_HEIGHT, header)
 	if header == '':
 		header_height = 0
 	height = len(options) + 2 + header_height
@@ -1395,7 +1492,7 @@ def target_tile(max_range=None):
 
 		(x, y) = (mouse.cx, mouse.cy)
 
-		if mouse.lbutton_pressed and libtcod.map_is_in_fov(fov_map, x, y):
+		if mouse.lbutton_pressed and libtcod.map_is_in_fov(map.fov, x, y):
 			if max_range is None or player.distance(x, y) <= max_range:
 				return (x, y)
 
@@ -1492,7 +1589,6 @@ def main_menu():
 
 def create_player():
 	global player, key, mouse
-	# con = libtcod.console_new(map_width, map_height)
 
 	noise2d = libtcod.noise_new(2)
 	noise_octaves = 8.0
@@ -1681,49 +1777,45 @@ class SkillPrompt:
 				libtcod.console_print(self.con, info_x + 4, info_y, string.capwords(ability['name']))
 				info_y += 1
 
-def skill_prompt(window, highlight_index):
-	header = "Select a Skill"
-	header_height = 3
-	width = 80
-	height = 3 + header_height
-	height = 40 + header_height
-	height = 40
+class MainMenuPrompt:
+	def __init__(self, width=50, height=40, con=None):
+		self.width = width
+		self.height = height
+		self.con = con
+		self.highlight_index = 0
+		self.options = ["Start a new Game", "Continue a Saved Game", "Quit"]
 
-	# render bg and frame
-	libtcod.console_set_default_background(window, MENU_BACKGROUND_COLOR)
-	libtcod.console_set_default_foreground(window, libtcod.Color(219, 209, 158))
-	libtcod.console_print_frame(window, 0, 0, width, height, clear=True, flag=libtcod.BKGND_SET)
-	libtcod.console_set_default_foreground(window, MENU_TEXT_COLOR)
+	def update(self):
+		global key, mouse
+		if key.vk == libtcod.KEY_UP:
+			self.highlight_index -= 1
+			if self.highlight_index < 0:
+				self.highlight_index = len(self.options) - 1
+			self.render()
+		elif key.vk == libtcod.KEY_DOWN:
+			self.highlight_index += 1
+			if self.highlight_index >= len(self.options):
+				self.highlight_index = 0
+			self.render()
 
-	# render header
-	libtcod.console_set_alignment(window, libtcod.CENTER)
-	libtcod.console_set_default_background(window, MENU_HEADER_BACKGROUND_COLOR)
-	libtcod.console_set_default_foreground(window, MENU_HEADER_TEXT_COLOR)
-	libtcod.console_rect(window, 1, 1, width-2, 1, True, libtcod.BKGND_SET)
-	libtcod.console_print_rect(window, width/2, 1, width-2, height, header)
-	libtcod.console_set_alignment(window, libtcod.LEFT)
-
-	list_width = 20
-	draw_x = 2
-	draw_y = header_height
-	list_x = draw_x
-	list_y = draw_y
-	list_index = 0
-
-	# render list of skills
-	libtcod.console_set_alignment(window, libtcod.LEFT)
-	libtcod.console_set_default_foreground(window, MENU_TEXT_COLOR)
-	for skill_name in skill_data:
-		if highlight_index == list_index:
-			libtcod.console_set_default_background(window, MENU_SELECTED_BACKGROUND_COLOR)
-			libtcod.console_rect(window, list_x, list_y, list_width, 1, True, libtcod.BKGND_SET)
-			libtcod.console_set_default_foreground(window, MENU_SELECTED_COLOR)
-			libtcod.console_print(window, list_x, list_y, skill_name.capitalize())
-			libtcod.console_set_default_foreground(window, MENU_TEXT_COLOR)
-		else:
-			libtcod.console_print(window, list_x, list_y, skill_name.capitalize())
-		list_y += 1
-		list_index += 1
+	def render(self):
+		(draw_x, draw_y) = draw_menu_panel(self.com, self.width, self.height, "Main Menu")
+		list_x = draw_x
+		list_y = draw_y
+		list_index = 0
+		libtcod.console_set_alignment(self.con, libtcod.LEFT)
+		libtcod.console_set_default_foreground(self.con, MENU_TEXT_COLOR)
+		for option in self.options:
+			if self.highlight_index == list_index:
+				libtcod.console_set_default_background(self.con, MENU_SELECTED_BACKGROUND_COLOR)
+				libtcod.console_rect(self.con, list_x, list_y, list_width, 1, True, libtcod.BKGND_SET)
+				libtcod.console_set_default_foreground(self.con, MENU_SELECTED_COLOR)
+				libtcod.console_print(self.con, list_x, list_y, skill_name.capitalize())
+				libtcod.console_set_default_foreground(self.con, MENU_TEXT_COLOR)
+			else:
+				libtcod.console_print(self.con, list_x, list_y, string.capwords(option))
+			list_y += 1
+			list_index += 1
 
 def draw_menu_panel(window, width, height, header_text=None):
 	# render background and frame
@@ -1790,7 +1882,7 @@ def message_log():
 			return
 
 def new_game():
-	global player, world, inventory, game_msgs, log_msgs, game_state, dungeon_level, pathfinder, camera, con
+	global world, map, player, inventory, game_msgs, log_msgs, game_state, dungeon_level, camera, con
 
 	player_equip_slots = ["head", "torso"]
 	player_equipment_component = Equipment(equip_slots=player_equip_slots)
@@ -1818,27 +1910,26 @@ def new_game():
 	game_state = 'playing'
 
 	camera = Camera(0, 0, width=SCREEN_WIDTH, height=43)
-	con = libtcod.console_new(camera.width, camera.height)	
 	make_town_map()
 	world.add_map(map)
 	camera.update_position(player.x, player.y)
 
 	initialize_fov()
-	if pathfinder is not None:
-		libtcod.path_delete(pathfinder)
-	pathfinder = libtcod.path_new_using_map(fov_map)
+	if map.pathfinder is not None:
+		libtcod.path_delete(map.pathfinder)
+	map.pathfinder = libtcod.path_new_using_map(map.fov)
 
 	message('Welcome stranger! Prepare to perish in the Tombs of the Ancient Kings.', libtcod.red)
 
 
 def initialize_fov():
-	global fov_recompute, fov_map
+	global fov_recompute, map
 	fov_recompute = True
-	fov_map = libtcod.map_new(map.width, map.height)
+	map.fov = libtcod.map_new(map.width, map.height)
 	for y in range(map.height):
 		for x in range(map.width):
-			libtcod.map_set_properties(fov_map, x, y, not map.grid[x][y].block_sight, not map.grid[x][y].blocked)
-	libtcod.console_clear(con)
+			libtcod.map_set_properties(map.fov, x, y, not map.grid[x][y].block_sight, not map.grid[x][y].blocked)
+	#libtcod.console_clear(con)
 
 
 def play_game():
@@ -1849,19 +1940,26 @@ def play_game():
 
 		libtcod.console_flush()
 
+		# TODO: The main loop is not where this needs to be happening..
 		check_level_up()
 
 		for object in map.objects:
 			object.clear()
 
-		player_action = handle_keys()
-		if player_action == 'exit':
-			break
+		if player.move_path is not None:
+			player_move_along_path()
+		else:
+			get_player_path_to_mouse()
+			player_action = handle_input()
+			if player_action == 'exit':
+				break
 
 		if game_state == 'playing' and player_action != 'didnt-take-turn':
+			map.markDirty(True)
 			for object in map.objects:
 				if object.ai:
 					object.ai.take_turn()
+
 
 	save_game()	
 
@@ -1880,7 +1978,7 @@ def save_game():
 	file.close()
 
 def load_game():
-	global map, world, camera, player, inventory, game_msgs, log_msgs, game_state, dungeon_level, con, pathfinder, fov_map
+	global map, world, camera, player, inventory, game_msgs, log_msgs, game_state, dungeon_level, con
 
 	file = shelve.open('savegame', 'r')
 	world = file['world']
@@ -1894,11 +1992,11 @@ def load_game():
 	game_state = file['game_state']
 	file.close()
 
-	con = libtcod.console_new(camera.width, camera.height)
+	camera.init_consoles()
 	initialize_fov()
-	if pathfinder is not None:
-		libtcod.path_delete(pathfinder)
-	pathfinder = libtcod.path_new_using_map(fov_map)
+	if map.pathfinder is not None:
+		libtcod.path_delete(map.pathfinder)
+	map.pathfinder = libtcod.path_new_using_map(map.fov)
 
 def load_data():
 	parser = libtcod.parser_new()
@@ -2124,6 +2222,13 @@ class Camera:
 		self.x = x
 		self.y = y
 		self.track_threshold = track_threshold
+		self.init_consoles()
+
+	def init_consoles(self):
+		self.map_con = libtcod.console_new(self.width, self.height)
+		self.object_con = libtcod.console_new(self.width, self.height)
+		libtcod.console_set_background_flag(self.object_con, libtcod.BKGND_NONE)
+		self.effects_con = libtcod.console_new(self.width, self.height)
 
 	def update_position(self, target_x, target_y):
 		center_x = target_x - (self.width / 2)
@@ -2154,12 +2259,15 @@ libtcod.console_init_root(SCREEN_WIDTH, SCREEN_HEIGHT, 'Seven Trials', False)
 libtcod.sys_set_fps(LIMIT_FPS)
 key=libtcod.Key()
 mouse=libtcod.Mouse()
+last_mouseX = 0
+last_mouseY = 0
+mouse_path_update_counter = 0
+mouse_path_update_delay = 10
+mouse_move_highlight_path = None
 
 panel = libtcod.console_new(SCREEN_WIDTH, SCREEN_HEIGHT)
 
-pathfinder = None
 camera = None
-con = libtcod.console_new(5, 5)
 
 ability_data = {}
 item_data = {}
@@ -2167,4 +2275,5 @@ monster_data = {}
 skill_data = {}
 namegen_sets = None
 load_data()
-main_menu()
+cProfile.run('main_menu()', 'mainMenuProfile')
+#main_menu()
